@@ -1,5 +1,5 @@
 {
-  "lightspeed.trex.components.KeyboardInput": {
+  "lightspeed.trex.logic.KeyboardInput": {
     "description": ["Checks the state of a keyboard key or key combination using the same format as RTX options."],
     "version": 1,
     "uiName": "Keyboard Input",
@@ -9,7 +9,7 @@
     "inputs": {
       "keyString": {
         "description": ["The key combination string (e.g., 'A', 'CTRL,A', 'SHIFT,SPACE'). Supports key names and combinations like RTX options."],
-        "type": "string",
+        "type": "token",
         "default": "A",
         "uiName": "Key String"
       }

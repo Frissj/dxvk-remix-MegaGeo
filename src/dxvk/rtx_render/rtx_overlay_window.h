@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023-2024, NVIDIA CORPORATION. All rights reserved.
+* Copyright (c) 2021-2023, NVIDIA CORPORATION. All rights reserved.
 *
 * Permission is hereby granted, free of charge, to any person obtaining a
 * copy of this software and associated documentation files (the "Software"),
@@ -19,26 +19,42 @@
 * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 * DEALINGS IN THE SOFTWARE.
 */
+
 #pragma once
 
-static const int16_t kInvalidThreadIndex = 32767; // ~ int16_t max
+#include "../../util/rc/util_rc.h"
+#include "../../util/rc/util_rc_ptr.h"
+#include "rtx_common_object.h"
 
-// Note: ensure alignment for C++ and Slang to match
-struct GpuPrintBufferElement
-{  
-  float4 writtenData;
+namespace dxvk {
+  class GameOverlay : public RcObject {
+  public:
+    GameOverlay() = delete;
 
-  u16vec2 threadIndex;    // Thread index of the written data
-  uint frameIndex;        // Frame index when the data was written
-  uint2 pad;
+    GameOverlay(const wchar_t* className, class ImGUI* pImgui);
+    ~GameOverlay();
 
-#ifndef __cplusplus
-  [mutating]
-#endif
-  void invalidate()
-  {
-    threadIndex.x = kInvalidThreadIndex;
-  }
+    HWND hwnd() const {  return m_hwnd; }
 
-  bool isValid() { return threadIndex.x != kInvalidThreadIndex; }
-};
+    void update(HWND gameHwnd);
+
+    void gameWndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    LRESULT overlayWndProc(UINT, WPARAM, LPARAM);
+
+  private:
+    void windowThreadMain();
+
+    void show();
+    void hide();
+
+    HWND m_gameHwnd = nullptr;
+    HWND m_hwnd = nullptr;
+
+    std::atomic<bool> m_running { true };
+    std::thread m_thread;
+    const wchar_t* m_className;
+
+    ImGUI* m_pImgui = nullptr;
+    UINT m_w = 1, m_h = 1;
+  };
+}

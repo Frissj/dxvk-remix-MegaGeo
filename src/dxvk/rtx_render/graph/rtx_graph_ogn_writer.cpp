@@ -59,8 +59,8 @@ std::string propertyTypeToOgnType(RtComponentPropertyType type) {
     case RtComponentPropertyType::Uint32: return "uint";
     case RtComponentPropertyType::Uint64: return "uint64";
     case RtComponentPropertyType::Prim: return "target";  // USD Relationship to a prim
-    case RtComponentPropertyType::String: return "string";
-    case RtComponentPropertyType::AssetPath: return "asset";
+    case RtComponentPropertyType::String: return "token";
+    case RtComponentPropertyType::AssetPath: return "token";
   }
   return "unknown";
 }
@@ -238,7 +238,8 @@ bool writeOGNSchema(const RtComponentSpec* spec, const char* outputFolderPath) {
       writePropertyToOGN(outputFile, *inputs[i], i == inputs.size() - 1);
     }
     outputFile << "    }";
-    if (!states.empty() || !outputs.empty()) {
+    // Note: if we ever add states back in, we need to restore the !states.empty() check.
+    if (/*!states.empty() ||*/ !outputs.empty()) {
       outputFile << ",";
     }
     outputFile << std::endl;
@@ -257,6 +258,7 @@ bool writeOGNSchema(const RtComponentSpec* spec, const char* outputFolderPath) {
   //   }
   //   outputFile << std::endl;
   // }
+  // If this section is restored, also restore the !states.empty() check in the inputs section above.
   
   // Write outputs section
   if (!outputs.empty()) {
@@ -298,7 +300,7 @@ bool writePythonStub(const RtComponentSpec* spec, const char* outputFolderPath) 
   outputFile << "from typing import TYPE_CHECKING" << std::endl;
   outputFile << std::endl;
   outputFile << "if TYPE_CHECKING:" << std::endl;
-  outputFile << "    from lightspeed.trex.components.ogn.ogn.OgnTemplateNodePyDatabase import OgnTemplateNodePyDatabase" << std::endl;
+  outputFile << "    from lightspeed.trex.logic.ogn.ogn.OgnTemplateNodePyDatabase import OgnTemplateNodePyDatabase" << std::endl;
   outputFile << std::endl;
   outputFile << std::endl;
   outputFile << "class "<< escapeJsonString(spec->getClassName()) << ":" << std::endl;

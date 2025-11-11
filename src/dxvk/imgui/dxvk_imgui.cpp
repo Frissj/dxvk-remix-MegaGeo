@@ -46,6 +46,7 @@
 #include "rtx_render/rtx_terrain_baker.h"
 #include "rtx_render/rtx_neural_radiance_cache.h"
 #include "rtx_render/rtx_ray_reconstruction.h"
+#include "rtx_render/rtx_xess.h"
 #include "rtx_render/rtx_rtxdi_rayquery.h"
 #include "rtx_render/rtx_restir_gi_rayquery.h"
 #include "rtx_render/rtx_debug_view.h"
@@ -63,6 +64,7 @@
 #include "../../d3d9/d3d9_rtx.h"
 #include "dxvk_memory_tracker.h"
 #include "rtx_render/rtx_particle_system.h"
+#include "rtx_render/rtx_overlay_window.h"
 
 
 namespace dxvk {
@@ -333,6 +335,7 @@ namespace dxvk {
       {UpscalerType::None, "None"},
       {UpscalerType::NIS, "NIS"},
       {UpscalerType::TAAU, "TAA-U"},
+      {UpscalerType::XeSS, "XeSS"},
   } });
 
   static auto upscalerDLSSCombo = ImGui::ComboWithKey<UpscalerType>(
@@ -342,6 +345,7 @@ namespace dxvk {
       {UpscalerType::DLSS, "DLSS"},
       {UpscalerType::NIS, "NIS"},
       {UpscalerType::TAAU, "TAA-U"},
+      {UpscalerType::XeSS, "XeSS"},
   } });
 
   ImGui::ComboWithKey<DlssPreset> dlssPresetCombo{
@@ -383,6 +387,20 @@ namespace dxvk {
         {TaauPreset::Balanced, "Balanced"},
         {TaauPreset::Quality, "Quality"},
         {TaauPreset::Fullscreen, "Fullscreen"},
+    } }
+  };
+
+  ImGui::ComboWithKey<XeSSPreset> xessPresetCombo{
+    "XeSS Preset",
+    ImGui::ComboWithKey<XeSSPreset>::ComboEntries{ {
+        {XeSSPreset::UltraPerf, "Ultra Performance"},
+        {XeSSPreset::Performance, "Performance"},
+        {XeSSPreset::Balanced, "Balanced"},
+        {XeSSPreset::Quality, "Quality"},
+        {XeSSPreset::UltraQuality, "Ultra Quality"},
+        {XeSSPreset::UltraQualityPlus, "Ultra Quality Plus"},
+        {XeSSPreset::NativeAA, "Native Anti-Aliasing"},
+        {XeSSPreset::Custom, "Custom"},
     } }
   };
 
@@ -467,6 +485,7 @@ namespace dxvk {
       { RtxFramePassStage::DLSS, "DLSS" },
       { RtxFramePassStage::DLSSRR, "DLSSRR" },
       { RtxFramePassStage::NIS, "NIS" },
+      { RtxFramePassStage::XeSS, "XeSS" },
       { RtxFramePassStage::TAA, "TAA" },
       { RtxFramePassStage::DustParticles, "DustParticles" },
       { RtxFramePassStage::Bloom, "Bloom" },
@@ -541,6 +560,16 @@ namespace dxvk {
       {    TerrainMode::AsDecals, "Terrain-as-Decals"},
   });
 
+  ImGui::ComboWithKey<OptionLayerType>::ComboEntries optionSavingModeComboEntries = { {
+      { OptionLayerType::User, "User", "Runtime settings"},
+      { OptionLayerType::Rtx, "Rtx", "RTX settings"},
+      { OptionLayerType::Quality, "Quality", "Graphics quality preset settings"},
+      { OptionLayerType::None, "None", "No settings layer; used for testing or temporary development" },
+  } };
+
+  static auto optionSavingModeCombo = ImGui::ComboWithKey<OptionLayerType>(
+    "Type of setting to save##option", ImGui::ComboWithKey<OptionLayerType>::ComboEntries { optionSavingModeComboEntries });
+
   static auto themeCombo = ImGui::ComboWithKey<ImGUI::Theme>(
     "Mode##theme",
     {
@@ -589,7 +618,7 @@ namespace dxvk {
 
   ImGUI::ImGUI(DxvkDevice* device)
   : m_device (device)
-  , m_hwnd   (nullptr)
+  , m_gameHwnd   (nullptr)
   , m_about  (new ImGuiAbout)
   , m_splash  (new ImGuiSplash)
   , m_graphGUI  (new RtxGraphGUI) {
@@ -667,6 +696,10 @@ namespace dxvk {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     m_capture = new ImGuiCapture(this);
+
+    if (RtxOptions::useNewGuiInputMethod()) {
+      m_overlayWin = new GameOverlay(L"RemixGuiInputSink", this);
+    }
   }
 
   ImGUI::~ImGUI() {
@@ -725,8 +758,15 @@ namespace dxvk {
   }
 
   void ImGUI::wndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    ImGui::SetCurrentContext(m_context);
-    ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+    if (m_overlayWin.ptr() != nullptr) {
+      m_overlayWin->gameWndProcHandler(hWnd, msg, wParam, lParam);
+    } else {
+      // Note this is the old method for grabbing keyboard/mouse inputs which relies on hooking
+      //  the wndproc from the original game, and sending that data across the x86 -> x64 bridge.  
+      //  We see compatibilities in older applications with this approach that are tricky to resolve.
+      //  Favour the new approach `useNewGuiInputMethod` when possible.
+      ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+    }
   }
 
   void ImGUI::showMemoryStats() const {
@@ -789,13 +829,6 @@ namespace dxvk {
     if (oldType == type && !force) {
       return;
     }
-    if (oldType == UIType::Basic) {
-      ImGui::CloseCurrentPopup();
-    }
-    
-    if (type == UIType::Basic) {
-      ImGui::OpenPopup(m_userGraphicsWindowTitle);
-    }
     
     if (type == UIType::None) {
       onCloseMenus();
@@ -804,10 +837,6 @@ namespace dxvk {
     }
 
     RtxOptions::showUI.setDeferred(type);
-
-    if (RtxOptions::showUICursor()) {
-      ImGui::GetIO().MouseDrawCursor = type != UIType::None;
-    }
 
     if (RtxOptions::blockInputToGameInUI()) {
       BridgeMessageChannel::get().send("UWM_REMIX_UIACTIVE_MSG",
@@ -923,6 +952,7 @@ namespace dxvk {
       }
     }
 
+
     // Toggle ImGUI mouse cursor. Alt-Del
     if (io.KeyAlt && ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Delete))) {
       RtxOptions::showUICursor.setDeferred(!RtxOptions::showUICursor());
@@ -952,15 +982,12 @@ namespace dxvk {
     showDebugVisualizations(ctx);
 
     const auto showUI = RtxOptions::showUI();
-
     if (showUI == UIType::Advanced) {
       showMainMenu(ctx);
 
       // Uncomment to see the ImGUI demo, good reference!  Also, need to undefine IMGUI_DISABLE_DEMO_WINDOWS (in "imconfig.h")
       //ImGui::ShowDemoWindow();
-    }
-
-    if (showUI == UIType::Basic) {
+    } else if (showUI == UIType::Basic) {
       showUserMenu(ctx);
     }
 
@@ -968,6 +995,20 @@ namespace dxvk {
     // windows from being interacted with.
     if (showUI == UIType::Advanced && m_reflexLatencyStatsOpen) {
       showReflexLatencyStats();
+    }
+
+    if (showUI == UIType::None) {
+      ImGui::CloseCurrentPopup();
+      ImGui::GetIO().MouseDrawCursor = false;
+    } else {
+      if (RtxOptions::showUICursor()) {
+        ImGui::GetIO().MouseDrawCursor = true;
+        // Force display counter into invisible state
+        while (ShowCursor(FALSE) >= 0) { }
+      } else {
+        // Force display counter into visible state
+        while (ShowCursor(TRUE) < 0) {  }
+      }
     }
 
     showHudMessages(ctx);
@@ -1099,12 +1140,13 @@ namespace dxvk {
     ImGui::Separator();
     ImGui::Dummy(ImVec2(0, 2));
 
-    ImGui::Checkbox("Save Changed Settings Only", &RtxOptions::serializeChangedOptionOnlyObject());
+    IMGUI_ADD_TOOLTIP(optionSavingModeCombo.getKey(&RtxOptions::Option::optionSavingTypeObject()), "Setting saving mode");
+
+    ImGui::Checkbox("Save Changed Settings Only", &RtxOptions::Option::serializeChangedOptionOnlyObject());
+    ImGui::Checkbox("Override configs", &RtxOptions::Option::overwriteConfigObject());
+
     const float buttonWidth = ImGui::GetContentRegionAvail().x / 3 - (ImGui::GetStyle().ItemSpacing.x);
-
-    if (IMGUI_ADD_TOOLTIP(ImGui::Button("Save Settings", ImVec2(buttonWidth, 0)), "Changes are now saved to user.conf. Use the 'Save' button in the rtx.conf layer if you want to store them there for sharing.")) {
-
-
+    if (IMGUI_ADD_TOOLTIP(ImGui::Button("Save Settings", ImVec2(buttonWidth, 0)), "Changes are now saved to selected config file.")) {
       RtxOptions::serialize();
     }
 
@@ -1134,14 +1176,7 @@ namespace dxvk {
   void ImGUI::showUserMenu(const Rc<DxvkContext>& ctx) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
 
-    // Record the texture setting at the first frame it shows up
-    static int lastFrameID = -1;
-    int currentFrameID = ctx->getDevice()->getCurrentFrameId();
-
-    // Open popup if it's specified by user settings
-    if (lastFrameID == -1) {
-      ImGui::OpenPopup(m_userGraphicsWindowTitle);
-    }
+    ImGui::OpenPopup(m_userGraphicsWindowTitle, ImGuiPopupFlags_NoOpenOverExistingPopup);
 
     ImGui::SetNextWindowPos(ImVec2(viewport->Size.x * 0.5f - m_userWindowWidth * 0.5f, viewport->Size.y * 0.5f - m_userWindowHeight * 0.5f));
     ImGui::SetNextWindowSize(ImVec2(m_userWindowWidth, 0));
@@ -1276,8 +1311,6 @@ namespace dxvk {
     }
 
     ImGui::PopStyleVar();
-
-    lastFrameID = currentFrameID;
   }
 
   void ImGUI::showUserGeneralSettings(
@@ -1409,9 +1442,28 @@ namespace dxvk {
 
           break;
         }
-        case UpscalerType::None:
+        case UpscalerType::XeSS: {
+          m_userGraphicsSettingChanged |= xessPresetCombo.getKey(&DxvkXeSS::XessOptions::presetObject());
+
+          // Show resolution slider only for Custom preset
+          if (DxvkXeSS::XessOptions::preset() == XeSSPreset::Custom) {
+            m_userGraphicsSettingChanged |= ImGui::SliderFloat("Resolution Scale", &RtxOptions::resolutionScaleObject(), 0.1f, 1.0f, "%.2f");
+          }
+
+          // Display XeSS internal resolution
+          auto& xess = ctx->getCommonObjects()->metaXeSS();
+
+          uint32_t inputWidth;
+          uint32_t inputHeight;
+          xess.getInputSize(inputWidth, inputHeight);
+          ImGui::TextWrapped(str::format("Render Resolution: ", inputWidth, "x", inputHeight).c_str());
+
+          break;
+        }
+        case UpscalerType::None: {
           // No custom UI here.
           break;
+        }
       }
 
       ImGui::Unindent(static_cast<float>(subItemIndent));
@@ -2055,12 +2107,17 @@ namespace dxvk {
           }
         }
 
+        ImGui::Checkbox("Override configs", &RtxOptions::Option::overwriteConfigObject());
+
         uint32_t optionLayerCounter = 1;
         for (auto& [priority, optionLayer] : RtxOptionImpl::getRtxOptionLayerMap()) {
           // Runtime option layer priority is reserved for real-time user changes.
           // These layers should not be modified through the GUI.
           if (priority != RtxOptionLayer::s_runtimeOptionLayerPriority) {
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
+            ImGui::Separator();
+            ImGui::Dummy(ImVec2(0.0f, 5.0f));
+
             const std::string optionLayerName = optionLayer.getName();
             
             // Process the display name
@@ -2081,8 +2138,8 @@ namespace dxvk {
             }
             
             const std::string optionLayerText = std::to_string(optionLayerCounter++) + ". " + displayName;
-            const std::string optionLayerStrengthText = " Strength";
-            const std::string optionLayerThresholdText = " Threshold";
+            const std::string optionLayerStrengthText = " Strength###Strength_" + displayName;
+            const std::string optionLayerThresholdText = " Threshold###Threshold_" + displayName;
             
             // Use pending values for UI display and send requests on change
             bool pendingEnabled = optionLayer.getPendingEnabled();
@@ -2102,11 +2159,22 @@ namespace dxvk {
               optionLayer.requestBlendThreshold(pendingThreshold);
             }
 
-            // Disabled because this blows away the existing settings and replaces it with the current runtime settings.
-            // TODO make this save out the combo of existing settings and runtime settings.
-            // const std::string optionLayerSavingText = "Save realtime changes into layer " + displayName;
-            // if (ImGui::Button(optionLayerSavingText.c_str())) {
-            //   RtxOptions::serializeOptionLayer(optionLayer.getName());
+            // TODO: We need to move these part into a separate saving session
+            // std::string layerType;
+            // if (optionLayerName == "rtx.conf") {
+            //   layerType = "RTX";
+            // } else if (optionLayerName == "quality.conf") {
+            //   layerType = "Quality";
+            // } else if (optionLayerName == "user.conf") {
+            //   layerType = "Runtime";
+            // } else {
+            //   layerType = optionLayerName;
+            // }
+            // const std::string optionLayerSavingText = RtxOptions::Option::saveToLayerConf() || displayName == "rtx.conf"?
+            //   "Save all settings from " + layerType + " layer to " + displayName :
+            //   "Save all settings from " + layerType + " layer to rtx.conf";
+            // if (IMGUI_ADD_TOOLTIP(ImGui::Button(optionLayerSavingText.c_str()), "Save layer to rtx.conf")) {
+            //   RtxOptions::serializeOptionLayer(optionLayer, RtxOptions::Option::saveToLayerConf());
             // }
 
             if (ImGui::CollapsingHeader(("Contents of " + displayName).c_str(), collapsingHeaderClosedFlags)) {
@@ -3545,7 +3613,22 @@ namespace dxvk {
         ImGui::SliderFloat("Resolution scale", &RtxOptions::resolutionScaleObject(), 0.5f, 1.0f);
         ImGui::SliderFloat("Sharpness", &ctx->getCommonObjects()->metaNIS().m_sharpness, 0.1f, 1.0f);
         ImGui::Checkbox("Use FP16", &ctx->getCommonObjects()->metaNIS().m_useFp16);
-      } else if (RtxOptions::upscalerType() == UpscalerType::TAAU) {
+      } else if (RtxOptions::upscalerType() == UpscalerType::XeSS) {
+          xessPresetCombo.getKey(&DxvkXeSS::XessOptions::presetObject());
+
+          // Show resolution slider only for Custom preset
+          if (DxvkXeSS::XessOptions::preset() == XeSSPreset::Custom) {
+            m_userGraphicsSettingChanged |= ImGui::SliderFloat("Resolution Scale", &RtxOptions::resolutionScaleObject(), 0.1f, 1.0f, "%.2f");
+          }
+
+          // Display XeSS internal resolution
+          auto& xess = ctx->getCommonObjects()->metaXeSS();
+
+          uint32_t inputWidth;
+          uint32_t inputHeight;
+          xess.getInputSize(inputWidth, inputHeight);
+          ImGui::TextWrapped(str::format("Render Resolution: ", inputWidth, "x", inputHeight).c_str());
+        } else if (RtxOptions::upscalerType() == UpscalerType::TAAU) {
         ImGui::SliderFloat("Resolution scale", &RtxOptions::resolutionScaleObject(), 0.5f, 1.0f);
       }
 
@@ -4204,12 +4287,16 @@ namespace dxvk {
   }
 
   void ImGUI::render(
-    const HWND hwnd,
+    const HWND gameHwnd,
     const Rc<DxvkContext>& ctx,
     VkSurfaceFormatKHR surfaceFormat,
     VkExtent2D         surfaceSize,
     bool               vsync) {
     ScopedGpuProfileZone(ctx, "ImGUI Render");
+
+    if (m_overlayWin.ptr() != nullptr) {
+      m_overlayWin->update(gameHwnd);
+    }
 
     m_lastRenderVsyncStatus = vsync;
 
@@ -4217,12 +4304,14 @@ namespace dxvk {
     ImPlot::SetCurrentContext(m_plotContext);
 
     // Sometimes games can change windows on us, so we need to check that here and tell ImGUI
-    if (m_hwnd != hwnd) {
-      if(m_init) {
+    if (m_gameHwnd != gameHwnd) {
+      m_gameHwnd = gameHwnd;
+
+      if (m_init) {
         ImGui_ImplWin32_Shutdown();
       }
-      m_hwnd = hwnd;
-      ImGui_ImplWin32_Init(hwnd);
+
+      ImGui_ImplWin32_Init(gameHwnd);
     }
 
     if (!m_init) {
@@ -4437,6 +4526,8 @@ namespace dxvk {
     //  the user has toggled a bunch of systems while in menus causing an artificial
     //  inflation.
     freeUnusedMemory();
+
+    ::ShowCursor(m_prevCursorVisible);
   }
 
   void ImGUI::onOpenMenus() {
@@ -4444,6 +4535,10 @@ namespace dxvk {
     //  user may want to make some changes to various settings and so they
     //  should have all available memory to do so.
     freeUnusedMemory();
+
+    CURSORINFO info;
+    GetCursorInfo(&info);
+    m_prevCursorVisible = info.flags == CURSOR_SHOWING;
   }
 
   void ImGUI::freeUnusedMemory() {

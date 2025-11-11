@@ -749,11 +749,23 @@ namespace dxvk {
     case OptionType::Vector4:
       *target.v4 += *source.v4 * weight;
       break;
+    case OptionType::HashSet:
+    {
+      target.hashSet->insert(source.hashSet->begin(), source.hashSet->end());
+      break;
+    }
+    case OptionType::HashVector:
+    {
+      target.hashVector->insert(target.hashVector->end(), source.hashVector->begin(), source.hashVector->end());
+      break;
+    }
+    case OptionType::IntVector:
+    {
+      target.intVector->insert(target.intVector->end(), source.intVector->begin(), source.intVector->end());
+      break;
+    }
     case OptionType::Bool:
     case OptionType::Int:
-    case OptionType::HashSet:
-    case OptionType::HashVector:
-    case OptionType::IntVector:
     case OptionType::VirtualKeys:
     case OptionType::Vector2i:
     case OptionType::String:
@@ -1057,16 +1069,21 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
     return s_rtxOptionLayers;
   }
 
-  const RtxOptionLayer* RtxOptionImpl::addRtxOptionLayer(const std::string& configPath, const uint32_t priority, const float blendStrength, const float blendThreshold, const Config* config) {
+  const RtxOptionLayer* RtxOptionImpl::addRtxOptionLayer(
+    const std::string& configPath, const uint32_t priority, const bool isSystemOptionLayer,
+    const float blendStrength, const float blendThreshold, const Config* config) {
+    // Adjust rtx.conf path if env var DXVK_RTX_CONFIG_FILE is set
+    const std::string adjustedConfigPath = configPath == "rtx.conf" ? RtxOptions::getRtxConfPath() : configPath;
+
     // Load config from path if not provided
-    const Config& layerConfig = config ? *config : Config::getOptionLayerConfig(configPath);
+    const Config& layerConfig = config ? *config : Config::getOptionLayerConfig(adjustedConfigPath);
     
     // Apply priority offset for option layers only when loading from path (not for rtx.conf or dxvk.conf)
     uint32_t adjustedPriority = priority;
-    if (!config && priority != RtxOptionLayer::s_runtimeOptionLayerPriority) {
+    if (!isSystemOptionLayer && !config && priority != RtxOptionLayer::s_runtimeOptionLayerPriority) {
       adjustedPriority += RtxOptionLayer::s_userOptionLayerOffset;
     }
-    
+
     // Construct the layer in-place in the map using emplace
     auto result = getRtxOptionLayerMap().emplace(
       std::piecewise_construct,
@@ -1085,7 +1102,7 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
     if (!layer.isValid()) {
       // Layer is invalid, remove it from the map
       getRtxOptionLayerMap().erase(result.first);
-      Logger::warn(str::format("[RTX Option]: Failed to load valid config for layer '", configPath, "' with original priority ", priority, " and adjusted priority ", adjustedPriority, "."));
+      Logger::warn(str::format("[RTX Option]: Failed to load valid config for layer '", adjustedConfigPath, "' with original priority ", priority, " and adjusted priority ", adjustedPriority, "."));
       return nullptr;
     }
     
