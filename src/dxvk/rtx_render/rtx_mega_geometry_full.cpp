@@ -155,94 +155,43 @@ namespace dxvk {
   }
 
   void RtxMegaGeometry::buildClusterAccelerationStructuresForFrame(Rc<DxvkContext> ctx) {
-    // EXACT SAMPLE MATCH: BuildAccel() lines 1254-1368
-    // Flow:
-    //   1. ComputeInstanceClusterTiling() - done in tessellateCollectedGeometry()
-    //   2. FillInstanceClusters() - fills cluster vertex data
-    //   3. BuildStructuredCLASes() - ONE GPU call for ALL CLAS (line 1365)
-    //   4. BuildBlasFromClas() - ONE GPU call for ALL BLAS (line 1368)
-
-    // CRITICAL: Only build ONCE per frame (sample calls BuildAccel once per frame)
-    // Multiple calls per frame cause GPU timeout (TDR)
-    static uint32_t lastBuildFrameId = 0xFFFFFFFF;
-    uint32_t currentFrameId = m_device->getCurrentFrameId();
-
-    if (currentFrameId == lastBuildFrameId) {
-      Logger::warn(str::format("[RTXMG BUILD ACCEL] SKIPPING: Already built for frame ", currentFrameId,
-                              " (", m_frameDrawCalls.size(), " draw calls will be deferred to next frame)"));
-      // Don't clear m_frameDrawCalls - they'll be built next frame
-      return;
-    }
-    lastBuildFrameId = currentFrameId;
-
-    static uint32_t callCount = 0;
-    callCount++;
-
-    Logger::info(str::format("[RTXMG BUILD ACCEL] ========== CALL #", callCount, " (Frame ", currentFrameId, ") =========="));
-    Logger::info(str::format("[RTXMG BUILD ACCEL] Processing ", m_frameDrawCalls.size(), " draw calls"));
+    // EXACT SAMPLE MATCH: BuildAccel() lines 1254-1398
+    // Sample Flow:
+    //   1. UpdateMemoryAllocations() - allocate BLAS buffers (BEFORE buildClusterAccelerationStructuresForFrame)
+    //   2. ComputeInstanceClusterTiling() - done in tessellateCollectedGeometry()
+    //   3. FillInstanceClusters() - fills cluster vertex data
+    //   4. BuildStructuredCLASes() - ONE GPU call for ALL CLAS
+    //   5. BuildBlasFromClas() - ONE GPU call for ALL BLAS
 
     if (m_frameDrawCalls.empty() || !isClusterAccelerationExtensionAvailable()) {
-      Logger::info("[RTXMG BUILD ACCEL] EARLY EXIT: No draw calls to process");
       m_frameDrawCalls.clear();
       return;
     }
 
     RtxContext* rtxCtx = dynamic_cast<RtxContext*>(ctx.ptr());
     if (!rtxCtx || !m_clusterBuilder) {
-      Logger::err("[RTXMG BUILD ACCEL] ERROR: Invalid context or cluster builder");
+      Logger::err("[RTXMG BUILD ACCEL] Invalid context or cluster builder");
       return;
     }
 
     ScopedGpuProfileZone(ctx, "RTX Mega Geometry: Build Unified CLAS and BLAS");
 
+    uint32_t currentFrameId = m_device->getCurrentFrameId();
     RtxmgConfig config;
     config.tessMode = RtxmgConfig::AdaptiveTessellationMode::WORLD_SPACE_EDGE_LENGTH;
     config.fineTessellationRate = 1.0f;
     config.coarseTessellationRate = 1.0f / 15.0f;
 
-    // Count total clusters and geometry stats across all draw calls
+    // Count total clusters and geometry stats
     uint32_t totalClusters = 0;
-    uint32_t totalVertices = 0;
-    uint32_t totalTriangles = 0;
     for (const auto& drawCall : m_frameDrawCalls) {
       totalClusters += drawCall.clusterCount;
-      totalVertices += drawCall.inputVertexCount;
-      totalTriangles += drawCall.inputIndexCount / 3;
     }
 
     if (totalClusters == 0) {
-      Logger::info("[RTXMG BUILD ACCEL] No clusters to build");
       m_frameDrawCalls.clear();
       return;
     }
-
-    // Update auto-tune with actual usage to grow cluster budget from 64K -> 2M dynamically
-    if (m_autoTune) {
-      VkPhysicalDeviceMemoryProperties memProps = m_device->adapter()->memoryProperties();
-
-      // Calculate available VRAM (total heap 0 minus used)
-      uint64_t totalVramBytes = memProps.memoryHeaps[0].size;
-      uint64_t availableVramMB = totalVramBytes / (1024 * 1024);
-
-      m_autoTune->updatePerFrame(totalVertices, totalTriangles, m_frameDrawCalls.size(), availableVramMB);
-
-      // Check if buffers need to be resized (grow or shrink with fence tracking)
-      if (m_autoTune->needsBufferResize()) {
-        resizeBuffersIfNeeded(ctx);
-      }
-    }
-
-    Logger::info(str::format("[RTXMG BUILD ACCEL] Building unified CLAS+BLAS for ",
-                            m_frameDrawCalls.size(), " instances, ",
-                            totalClusters, " total clusters"));
-
-    // EXACT SAMPLE MATCH: Build ALL CLAS structures in ONE GPU operation
-    // Sample line 1365: BuildStructuredCLASes(accels, maxGeometryCountPerMesh, tessCounterRange, commandList);
-    // This uses executeMultiIndirectClusterOperation with ClasInstantiateTemplates
-
-    // EXACT SAMPLE MATCH: Build ALL BLAS structures in ONE GPU operation
-    // Sample line 1368: BuildBlasFromClas(accels, instances, commandList);
-    // This uses executeMultiIndirectClusterOperation with BuildClustersBottomLevel
 
     // Convert to cluster builder format
     std::vector<RtxmgClusterBuilder::DrawCallData> drawCallsForBuilder;
@@ -255,8 +204,6 @@ namespace dxvk {
       data.drawCallIndex = drawCall.drawCallIndex;
       data.clusterCount = drawCall.clusterCount;
       data.output = drawCall.output;
-
-      // CRITICAL FIX: Copy input geometry for fill_clusters reconstruction
       data.inputPositions = drawCall.inputPositions;
       data.inputNormals = drawCall.inputNormals;
       data.inputTexcoords = drawCall.inputTexcoords;
@@ -266,77 +213,33 @@ namespace dxvk {
       data.positionOffset = drawCall.positionOffset;
       data.normalOffset = drawCall.normalOffset;
       data.texcoordOffset = drawCall.texcoordOffset;
-
       drawCallsForBuilder.push_back(data);
     }
 
-    // CRITICAL: Split CLAS and BLAS building like reference implementation
-    // Reference: cluster_accel_builder.cpp:1365-1368
-    // Line 1365: BuildStructuredCLASes()
-    // Line 1368: BuildBlasFromClas()
-    // CRITICAL: Both use SAME command buffer without flush between them!
+    // SDK MATCH: Allocate BLAS buffers ONCE per frame BEFORE building (sample: UpdateMemoryAllocations line 1265)
+    // CRITICAL: This MUST be called BEFORE buildClusterAccelerationStructuresForFrame to match sample's flow
+    // Sample calls UpdateMemoryAllocations() at the start of BuildAccel(), before any GPU work
+    uint32_t maxClustersPerBlas = 0;
+    for (const auto& drawCall : drawCallsForBuilder) {
+      maxClustersPerBlas = std::max(maxClustersPerBlas, drawCall.clusterCount);
+    }
+    m_clusterBuilder->updateBlasAllocation(rtxCtx, totalClusters, maxClustersPerBlas,
+                                           static_cast<uint32_t>(drawCallsForBuilder.size()));
 
-    // Step 1: Build CLAS (pass frame index for ring buffer indexing)
-    if (!m_clusterBuilder->buildStructuredCLASes(rtxCtx, drawCallsForBuilder, config, currentFrameId)) {
-      Logger::err("[RTXMG BUILD ACCEL] CLAS building failed");
+    // SDK MATCH: Build cluster acceleration structures (sample: BuildAccel line 1254)
+    // This unified function calls FillInstanceClusters -> BuildStructuredCLASes -> BuildBlasFromClas
+    // Note: updateBlasAllocation() is now called OUTSIDE this function (above) to match sample
+    if (!m_clusterBuilder->buildClusterAccelerationStructuresForFrame(rtxCtx, drawCallsForBuilder, config, currentFrameId)) {
+      Logger::err("[RTXMG BUILD ACCEL] Cluster acceleration structure building failed");
       m_frameDrawCalls.clear();
       return;
     }
 
-    // Step 2: Build BLAS from CLAS (SAME command buffer, no flush!)
-    // Reference line 1368 calls this immediately after CLAS build
-    if (!m_clusterBuilder->buildBlasFromClas(rtxCtx, drawCallsForBuilder, config)) {
-      Logger::err("[RTXMG BUILD ACCEL] BLAS building failed");
-      m_frameDrawCalls.clear();
-      return;
-    }
-
-    // Step 3: SAMPLE MATCH - Inject cluster BLASes into scene instances (BEFORE TLAS build)
-    // This is CPU-side only - modifies instance BLAS references in the scene
-    // Must happen after BLAS build but before TLAS upload/build
-    Logger::info("[RTXMG BUILD ACCEL] Injecting cluster BLASes into scene instances...");
-    SceneManager& sceneManager = ctx->getCommonObjects()->getSceneManager();
-    injectClusterBlasesIntoScene(rtxCtx, sceneManager, this);
-    Logger::info("[RTXMG BUILD ACCEL] Cluster BLAS injection complete");
-
-    // NOTE: Do NOT flush here! TLAS build must happen in the same command buffer for barriers to work.
-    // NVIDIA's sample (rtxmg_renderer.cpp:1062-1160) does BuildAccel → FillInstanceDescs → buildTopLevelAccelStruct
-    // ALL IN THE SAME COMMAND LIST with NO flush between them.
-    // Barriers only work within the same command buffer!
-    Logger::info(str::format("[RTXMG BUILD ACCEL] COMPLETE: Built unified CLAS+BLAS+Injected for ",
-                            m_frameDrawCalls.size(), " instances (NO flush - TLAS will build in same command buffer)"));
-
-    // NOTE: CPU-side readback of blasPtrsBuffer returns all zeros (confirmed in both IMPLICIT and
-    // EXPLICIT_DESTINATIONS modes). NVIDIA sample doesn't do CPU readback - it only uses GPU-side
-    // patching via FillInstanceDescs shader (rtxmg_renderer.cpp:1155).
-    //
-    // BLAS addresses are patched directly on GPU by AccelManager::patchClusterBlasAddresses()
-    // which uses the patch_tlas_instance_blas_addresses compute shader.
-    // The CPU never needs to know the actual BLAS addresses.
-    //
-    // Caching with null addresses (0x0) is safe because:
-    // 1. GPU patching reads from blasPtrsBuffer directly (never uses cached addresses)
-    // 2. Cached geometry is only used to skip re-tessellation, not for address lookup
-    Logger::info("[RTXMG BLAS] Skipping CPU readback - addresses will be patched on GPU");
-
-    // NVIDIA SAMPLE APPROACH: Always rebuild every frame
-    // - Cache LOOKUP is disabled (rtx_mega_geometry_integration.cpp:411) → always rebuild
-    // - Cache STORAGE is enabled (below) → injection can find cluster BLASes THIS frame
-    //
-    // This ensures fresh hash→index mapping each frame while allowing injection to work.
+    // Cache geometry for this frame's injection (not in sample, but needed for our architecture)
     const ClusterAccels* frameAccels = m_clusterBuilder ? &m_clusterBuilder->getFrameAccels() : nullptr;
     for (const auto& drawCall : m_frameDrawCalls) {
-      // Cache tessellated geometry with frameAccels for THIS FRAME's injection
-      // GPU patching will read correct addresses from blasPtrsBuffer
-      cacheTessellatedGeometry(
-        ctx,  // Pass context for command list tracking
-        drawCall.geometryHash,
-        drawCall.output,
-        frameAccels,
-        0,  // BLAS address - not needed, GPU patching handles this
-        0); // BLAS size - not needed
+      cacheTessellatedGeometry(ctx, drawCall.geometryHash, drawCall.output, frameAccels, 0, 0);
     }
-    Logger::info(str::format("[RTXMG] Cached ", m_frameDrawCalls.size(), " cluster BLASes for injection this frame"));
 
     // Clear frame data for next frame
     m_frameDrawCalls.clear();

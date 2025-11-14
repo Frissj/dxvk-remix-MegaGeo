@@ -163,6 +163,7 @@ private:
   // RTXMG GPU PATCHING: Per-instance cluster BLAS data for GPU shader
   std::vector<uint32_t> m_instanceBlasBufferIndices;  // blasBufferIndex for each TLAS instance
   Rc<DxvkBuffer> m_instanceBlasBufferIndicesGpu;      // GPU buffer with per-instance blasBufferIndex
+  Rc<DxvkBuffer> m_patchTlasParamsBuffer;             // Reusable constant buffer for patch TLAS compute shader params (avoid frame-by-frame allocation)
 
   Rc<DxvkBuffer> m_vkInstanceBuffer; // Note: Holds Vulkan AS Instances, not RtInstances
   Rc<DxvkBuffer> m_surfaceBuffer;

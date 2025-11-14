@@ -31,20 +31,27 @@ struct CopyClusterOffsetParams {
 // Output: cluster offset/count pairs - shifted +1
 [[vk::binding(2, 0)]] RWStructuredBuffer<uint2> clusterOffsetCountsOut;
 
+// SDK Constants: ClusterDispatchType
+static const uint kClusterDispatchTypeAll = 3;
+static const uint kClusterDispatchTypeNumTypes = 4;
+
 [shader("compute")]
 [numthreads(kThreadsPerGroup, 1, 1)]
 void main(uint3 threadIdx : SV_DispatchThreadID)
 {
   uint instanceIndex = cb.instanceIndex;
-  if (instanceIndex >= cb.totalInstances)
-    return;
-
-  // Read TOTAL cluster count from GLOBAL counter [0] (SDK MATCH)
-  // All instances accumulated into [0], this shader calculates per-instance offsets sequentially
   uint totalClusterCount = tessCountersIn[0].clusters;
 
-  // Calculate this instance's cluster count based on cumulative offset
-  // SDK pattern: dispatchClusterCount = totalClusterCount - instanceOffset
+  // CRITICAL: Buffer writes must use instanceIndex * NumTypes + dispatchTypeIndex (SDK MATCH)
+  // This shader is called multiple times per instance, once per ClusterDispatchType
+
+  // Note: cb.dispatchTypeIndex is available but RTX Remix doesn't use it
+  // For now, write to "All" type (index 3) which contains complete cluster counts
+  // This matches the expected indexing pattern in fill_blas_from_clas_args.comp.slang
+
+  uint dispatchTypeIndex = kClusterDispatchTypeAll;
+  uint writeIndex = instanceIndex * kClusterDispatchTypeNumTypes + dispatchTypeIndex;
+
   uint dispatchClusterCount = 0;
   uint clusterOffset = 0;
 
@@ -53,12 +60,12 @@ void main(uint3 threadIdx : SV_DispatchThreadID)
     dispatchClusterCount = totalClusterCount;
     clusterOffset = 0;
   } else {
-    // Read previous instance's data to calculate cumulative offset
-    uint2 prevOffsetCount = clusterOffsetCountsOut[instanceIndex - 1];
+    // Read previous instance's "All" type data to calculate cumulative offset
+    uint2 prevOffsetCount = clusterOffsetCountsOut[(instanceIndex - 1) * kClusterDispatchTypeNumTypes + kClusterDispatchTypeAll];
     clusterOffset = prevOffsetCount.x + prevOffsetCount.y;
     dispatchClusterCount = totalClusterCount - clusterOffset;
   }
 
-  // Write offset and count for this instance
-  clusterOffsetCountsOut[instanceIndex] = uint2(clusterOffset, dispatchClusterCount);
+  // Write offset and count for this instance (to the correct multiplied index)
+  clusterOffsetCountsOut[writeIndex] = uint2(clusterOffset, dispatchClusterCount);
 }

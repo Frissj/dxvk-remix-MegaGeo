@@ -47,8 +47,12 @@ void main(uint3 threadIdx : SV_DispatchThreadID)
     return;
 
   // Read cluster offset and count for this instance
+  // CRITICAL: Cluster offset buffer has 4 entries per instance (one per ClusterDispatchType)
+  // We want the "All" type (index 3) which contains complete cluster counts
   // Format: x = offset into CLAS addresses array, y = number of clusters
-  uint2 offsetCount = clusterOffsetCounts[instanceIndex];
+  static const uint kClusterDispatchTypeAll = 3;
+  static const uint kClusterDispatchTypeNumTypes = 4;
+  uint2 offsetCount = clusterOffsetCounts[instanceIndex * kClusterDispatchTypeNumTypes + kClusterDispatchTypeAll];
 
   // Fill indirect args
   BlasFromClasIndirectArg args;

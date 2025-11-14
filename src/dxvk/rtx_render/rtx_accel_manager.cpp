@@ -22,6 +22,7 @@
 #include <mutex>
 #include <vector>
 #include <assert.h>
+#include <chrono>
 
 #include "rtx.h"
 #include "rtx_context.h"
@@ -58,6 +59,23 @@ namespace dxvk {
     //    // only allocated with a 64 byte alignment.
     //    // Note: This could use the value of m_scratchAlignment, but this is duplicated to avoid potential future initialization order issues.
     , m_scratchAlignment(device->properties().khrDeviceAccelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment) {
+    // Create reusable constant buffer for patch TLAS compute shader params (avoid frame-by-frame allocation)
+    struct PatchTlasParams {
+      uint32_t numInstances;
+      uint32_t _pad1;
+      uint32_t _pad2;
+      uint32_t _pad3;
+    };
+    DxvkBufferCreateInfo cbInfo = {};
+    cbInfo.size = align(sizeof(PatchTlasParams), 256);
+    cbInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    cbInfo.stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    cbInfo.access = VK_ACCESS_UNIFORM_READ_BIT;
+    m_patchTlasParamsBuffer = device->createBuffer(
+      cbInfo,
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+      DxvkMemoryStats::Category::RTXBuffer,
+      "RTXMG Patch TLAS Params (Reusable)");
   }
 
   void AccelManager::clear() {
@@ -1543,8 +1561,12 @@ create_tlas_instance:  // Label for TLAS instance creation (used by cached BLAS 
     // RTXMG SAMPLE EXACT MATCH: FillInstanceDescs() shader call from line 1155 in rtxmg_renderer.cpp
     // This runs immediately before buildTopLevelAccelStructFromBuffer() with NO flush between them
     Logger::info(str::format("[TLAS TIMING] Calling patchClusterBlasAddresses (frame ", frameId, ")..."));
+    auto t_patch_start = std::chrono::high_resolution_clock::now();
     patchClusterBlasAddresses(ctx);
-    Logger::info(str::format("[TLAS TIMING] patchClusterBlasAddresses returned (frame ", frameId, ")"));
+    auto t_patch_end = std::chrono::high_resolution_clock::now();
+    auto t_patch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_patch_end - t_patch_start);
+    Logger::info(str::format("[TLAS TIMING] patchClusterBlasAddresses returned (frame ", frameId, ", took ", t_patch_ms.count(), "ms)"));
+    Logger::info(str::format("[FRAME TIMING] Frame ", frameId, ": patchClusterBlasAddresses took ", t_patch_ms.count(), "ms"));
     // NOTE: No flush here - patchClusterBlasAddresses emits barrier internally for compute→accel reads
     // Command buffer stays open for immediate TLAS build - matches RTXMG sample
 
@@ -1556,10 +1578,19 @@ create_tlas_instance:  // Label for TLAS instance creation (used by cached BLAS 
 
     Logger::info("[TLAS TIMING] Building Opaque TLAS...");
     size_t totalScratchSize = 0;
+    auto t_opaque_start = std::chrono::high_resolution_clock::now();
     internalBuildTlas<Tlas::Opaque>(ctx, totalScratchSize);
-    Logger::info("[TLAS TIMING] Opaque TLAS build complete, building Unordered TLAS...");
+    auto t_opaque_end = std::chrono::high_resolution_clock::now();
+    auto t_opaque_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_opaque_end - t_opaque_start);
+    Logger::info(str::format("[TLAS TIMING] Opaque TLAS build complete (took ", t_opaque_ms.count(), "ms), building Unordered TLAS..."));
+    Logger::info(str::format("[FRAME TIMING] Frame ", frameId, ": buildTlas Opaque took ", t_opaque_ms.count(), "ms"));
+
+    auto t_unordered_start = std::chrono::high_resolution_clock::now();
     internalBuildTlas<Tlas::Unordered>(ctx, totalScratchSize);
-    Logger::info("[TLAS TIMING] Unordered TLAS build complete");
+    auto t_unordered_end = std::chrono::high_resolution_clock::now();
+    auto t_unordered_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_unordered_end - t_unordered_start);
+    Logger::info(str::format("[TLAS TIMING] Unordered TLAS build complete (took ", t_unordered_ms.count(), "ms)"));
+    Logger::info(str::format("[FRAME TIMING] Frame ", frameId, ": buildTlas Unordered took ", t_unordered_ms.count(), "ms"));
 
     Logger::info("[TLAS TIMING] Emitting post-TLAS barrier (TLAS writes -> ray tracing reads)...");
     ctx->emitMemoryBarrier(0,
@@ -1698,20 +1729,10 @@ create_tlas_instance:  // Label for TLAS instance creation (used by cached BLAS 
 
     Logger::info(str::format("[GPU PATCHING DEBUG] Params: numInstances=", params.numInstances));
 
-    // Create constant buffer for params
-    DxvkBufferCreateInfo cbInfo = {};
-    cbInfo.size = align(sizeof(params), 256);
-    cbInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    cbInfo.stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    cbInfo.access = VK_ACCESS_UNIFORM_READ_BIT;
-    Rc<DxvkBuffer> patchTlasParamsBuffer = m_device->createBuffer(
-      cbInfo,
-      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-      DxvkMemoryStats::Category::RTXBuffer,
-      "RTXMG Patch TLAS Params");
-
-    ctx->updateBuffer(patchTlasParamsBuffer, 0, sizeof(params), &params);
-    Logger::info("[GPU PATCHING DEBUG] Constant buffer created and updated");
+    // Reuse the member buffer instead of allocating a new one each frame
+    // This avoids GPU memory exhaustion after ~100 frames
+    ctx->updateBuffer(m_patchTlasParamsBuffer, 0, sizeof(params), &params);
+    Logger::info("[GPU PATCHING DEBUG] Constant buffer updated (reused from member)");
 
     // Get and bind shader
     Rc<DxvkShader> shader = megaGeometry->getPatchTlasInstanceShader();
@@ -1724,7 +1745,7 @@ create_tlas_instance:  // Label for TLAS instance creation (used by cached BLAS 
     Logger::info(str::format("[GPU PATCHING DEBUG] Compute shader bound: ", shader->debugName()));
 
     // Bind constant buffer at binding 0
-    ctx->bindResourceBuffer(0, DxvkBufferSlice(patchTlasParamsBuffer, 0, sizeof(params)));
+    ctx->bindResourceBuffer(0, DxvkBufferSlice(m_patchTlasParamsBuffer, 0, sizeof(params)));
 
     // Bind shader resources matching sample pattern
     // Binding 1: blasAddresses (one per instance) - SRV (read-only)
@@ -1748,12 +1769,13 @@ create_tlas_instance:  // Label for TLAS instance creation (used by cached BLAS 
     Logger::info("[GPU PATCHING DISPATCH] Compute shader dispatched successfully");
 
     // Barrier: ensure GPU patching writes complete before TLAS build reads
+    // CRITICAL: Include SHADER_READ_BIT to ensure instance buffer reads see patched data!
     Logger::info("[GPU PATCHING BARRIER] Emitting barrier (compute writes → TLAS build reads)");
     ctx->emitMemoryBarrier(0,
       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
       VK_ACCESS_SHADER_WRITE_BIT,
       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-      VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
     Logger::info("[GPU PATCHING] patchClusterBlasAddresses complete");
   }

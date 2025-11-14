@@ -389,12 +389,9 @@ namespace dxvk {
       VkDeviceAddress clusterBlasAddress = 0;
       uint32_t clusterBlasSize = 0;
 
-      // GPU synchronization: Track the fence from BLAS build submission
-      // CRITICAL: Store VkFence directly (not command list) to avoid recycled pointer issues
-      // We check fence with vkGetFenceStatus() - O(1), non-blocking, microseconds
-      // If fence not ready, we simply skip reuse (don't block CPU)
-      VkFence buildFence = VK_NULL_HANDLE;   // Fence from GPU submission that built this BLAS
-      bool gpuWorkComplete = false;          // Cached result to avoid repeated checks
+      // NOTE: No GPU synchronization needed
+      // We rebuild cluster BLASes every frame, so no caching across frame boundaries
+      // GPU completes work before frame submission (sample match)
     };
 
     // Debug visualization modes

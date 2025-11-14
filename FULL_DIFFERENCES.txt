@@ -1,0 +1,173 @@
+=== COMPLETE DIFFERENCE LIST: Sample vs Our Implementation ===
+
+1. FUNCTION SIGNATURE
+   Sample: void ClusterAccelBuilder::BuildBlasFromClas(ClusterAccels& accels, std::span<Instance const> instances, nvrhi::ICommandList* commandList)
+   Ours:   bool RtxmgClusterBuilder::buildBlasFromClas(RtxContext* ctx, const std::vector<DrawCallData>& drawCalls, const RtxmgConfig& config)
+   → Different parameter signatures and return type
+
+2. SCOPED MARKER & TIMING
+   Sample: nvrhi::utils::ScopedMarker marker(commandList, "Blas Build from Clas");  // Line 1060
+           stats::clusterAccelSamplers.buildBlasTime.Start(commandList);            // Line 1061
+           stats::clusterAccelSamplers.buildBlasTime.Stop();                         // Line 1095
+   Ours:   NO SCOPEDMARKER
+           NO STATS TIMING CALLS
+   → Missing GPU-side timing instrumentation
+
+3. INITIALIZATION CHECK
+   Sample: None (trusts input is valid)
+   Ours:   if (!m_initialized) return false;                                       // Lines 1312-1315
+           if (drawCalls.empty()) return false;                                    // Lines 1317-1320
+   → Extra validation we do but sample doesn't
+
+4. GEOMETRY HASH MAPPING & FRAME TRACKING
+   Sample: None (doesn't track per-geometry mapping)
+   Ours:   static uint32_t lastMappingFrameId = 0xFFFFFFFF;                        // Lines 1328-1346
+           static uint32_t nextBufferIndex = 0;
+           static uint32_t blasPtrsBufferOffset = 0;
+           uint32_t currentFrameId = m_device->getCurrentFrameId();
+           if (currentFrameId != lastMappingFrameId) {
+               m_geometryHashToBlasIndex.clear();
+               ...
+           }
+           + loop to assign indices (lines 1348-1359)
+           + validation (lines 1361-1368)
+           + logging (lines 1370, 1341-1342, 1354-1356)
+   → Entire ~50 line block that sample doesn't have
+
+5. CLUSTER ESTIMATION LOOP
+   Sample: None
+   Ours:   uint32_t estimatedTotalClusters = 0;                                   // Lines 1376-1382
+           uint32_t maxClustersPerBlas = 0;
+           for (const auto& drawCall : drawCalls) {
+               estimatedTotalClusters += drawCall.clusterCount;
+               maxClustersPerBlas = std::max(maxClustersPerBlas, drawCall.clusterCount);
+           }
+   → Extra computation we do
+
+6. UPDATE BLAS ALLOCATION
+   Sample: None (UpdateMemoryAllocations is called separately in BuildAccel at line 1265)
+   Ours:   updateBlasAllocation(ctx, estimatedTotalClusters, maxClustersPerBlas, drawCalls.size());  // Line 1392
+   → We inline a call sample does separately
+
+7. LOGGING STATEMENTS
+   Sample: 0-1 optional logging (lines 1067-1075, only if enableLogging is true)
+   Ours:   40+ Logger::info/err calls throughout the function
+   → Massive verbosity difference
+
+8. FILLBLASFROMPLASARGS APPROACH
+   Sample: FillBlasFromClasArgs(m_blasFromClasIndirectArgsBuffer, m_clusterOffsetCountsBuffer, clasPtrsBaseAddress, numInstances, commandList);  // Line 1065
+           (Clean helper function call)
+   Ours:   Inline block ~38 lines (1412-1449) that duplicates the shader binding/dispatch logic
+   → We inline instead of calling helper
+
+9. BLAS ALLOCATION LOGGING
+   Sample: None
+   Ours:   Logger::info with BLAS buffer sizes (lines 1455-1458)
+   → Extra logging
+
+10. STRUCT INITIALIZATION STYLE
+    Sample: cluster::OperationDesc createBlasDesc = {
+                .params = m_createBlasParams,
+                .scratchSizeInBytes = m_createBlasSizeInfo.scratchSizeInBytes,
+                .inIndirectArgCountBuffer = nullptr,
+                ...
+            };  // Uses designated initializers (C++20)
+    Ours:   ClusterOperationDesc buildBlasDesc = {};
+            buildBlasDesc.params = m_createBlasInputInfo;
+            buildBlasDesc.scratchData = m_frameAccels.blasScratchBuffer.getDeviceAddress();
+            ...  // Traditional initialization
+    → Different initialization style
+
+11. MEMBER VARIABLE STORAGE FOR PARAMS
+    Sample: Uses m_createBlasParams member (set elsewhere, reused)
+    Ours:   Also uses member variables (lines 1462-1479: m_createBlasParams, m_createBlasInputInfo)
+    → Same approach, good
+
+12. VALIDATION LOGGING
+    Sample: None
+    Ours:   Logger::info("[RTXMG BLAS VALIDATION] ========== PRE-GPU-WORK VALIDATION ==========");  // Lines 1535-1540
+            Logger::info with multiple validation checks
+    → Extra validation logging
+
+13. PARAMETER LOGGING
+    Sample: None
+    Ours:   Logger::info with parameter values (lines 1524-1532)
+    → Extra parameter logging
+
+14. EXECUTEULTIIINDIRECTCLUSTEROPERATION CALL
+    Sample: commandList->executeMultiIndirectClusterOperation(createBlasDesc);  // Line 1093
+            (Direct call, no error handling)
+    Ours:   try {
+                executeMultiIndirectClusterOperation(ctx, buildBlasDesc);         // Line 1546
+            } catch (const std::exception& e) {
+                Logger::err(...);
+                return false;
+            } catch (...) {
+                Logger::err(...);
+                return false;
+            }
+    → Exception handling we add (sample doesn't have)
+
+15. LOGGING AFTER GPU CALL
+    Sample: stats::clusterAccelSamplers.buildBlasTime.Stop();  // Line 1095
+    Ours:   Logger::info multiple messages (lines 1547, 1557)
+    → Post-GPU logging
+
+16. MEMORY BARRIER
+    Sample: None after executeMultiIndirectClusterOperation
+    Ours:   Full memory barrier implementation (lines 1559-1582) with extensive logging
+    → We add explicit memory barrier; sample doesn't
+
+17. READBACK HANDLING
+    Sample: Line 1371: m_buildAccelFrameIndex++ and implicit async readback
+    Ours:   Lines 1587-1591: Disabled readback with explanation why (GPU device lost)
+    → Different readback strategy
+
+18. OFFSET HANDLING
+    Sample: All offsets hardcoded to 0 (lines 1082-1091)
+    Ours:   Now also offset = 0 (after recent fix, lines 1505, 1515, 1521)
+    → RECENTLY FIXED ✓
+
+19. COMPLETION LOGGING
+    Sample: stats::clusterAccelSamplers.buildBlasTime.Stop();
+    Ours:   Logger::info with multiple summary messages (lines 1602-1609)
+    → Extra completion logging
+
+20. RETURN VALUE
+    Sample: void (no return)
+    Ours:   bool (return true/false)
+    → Different contract
+
+=== SUMMARY OF MAJOR DIFFERENCES ===
+
+STRUCTURAL DIFFERENCES:
+✓ Sample is 40 lines clean function
+✗ Our code is 305+ lines with extra logic
+✓ Sample uses helper functions
+✗ We inline everything
+✓ Sample uses designated initializers
+✗ We use traditional initialization
+✗ We have geometry hash mapping (sample doesn't need this)
+✗ We have frame tracking with static variables
+✗ We have cluster estimation loop
+✗ We have initialization check
+✗ We have exception handling
+✗ We have manual memory barriers
+✗ We have 40+ Logger::info calls (sample has 1-2)
+
+ARCHITECTURAL ISSUES:
+1. Our function tries to do too much (parameter setup, validation, error handling)
+2. Sample cleanly separates concerns
+3. We duplicate logic inline instead of calling helpers
+4. We have unnecessary geometry hash mapping that sample doesn't use
+
+PERFORMANCE IMPLICATIONS:
+- All the logging adds CPU overhead even without printing
+- Exception handling adds overhead
+- Manual memory barrier might interfere with driver optimizations
+- The try-catch blocks might impact performance
+
+CORRECTNESS ISSUES (FIXED):
+✓ Buffer offsets now match (were cumulative, now 0)
+✗ Geometry hash mapping may not match sample's architecture
+✗ Extra validation may cause false negatives

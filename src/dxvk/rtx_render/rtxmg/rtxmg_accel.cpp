@@ -1678,12 +1678,69 @@ void executeMultiIndirectClusterOperation(
   Logger::info(str::format("[RTXMG VK CALL]   stride: ", commandsInfo.dstSizesArray.stride, " bytes"));
   Logger::info(str::format("[RTXMG VK CALL]   size: ", commandsInfo.dstSizesArray.size, " bytes"));
   Logger::info(str::format("[RTXMG VK CALL] Destination implicit data: 0x", std::hex, commandsInfo.dstImplicitData, std::dec));
+
+  // ============================================================================
+  // CRITICAL: Log indirect arguments data BEFORE GPU execution
+  // ============================================================================
+  Logger::info("[RTXMG INDIRECT-ARGS] ========== INDIRECT ARGUMENTS DATA VALIDATION ==========");
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] Operation: ",
+    (desc.params.opType == VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_INSTANTIATE_CLUSTERS_NV ? "INSTANTIATE_CLAS" : "BUILD_BLAS")));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] Source buffer address: 0x", std::hex, commandsInfo.srcInfosArray.deviceAddress, std::dec));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] Source buffer size: ", commandsInfo.srcInfosArray.size, " bytes"));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] Stride per entry: ", commandsInfo.srcInfosArray.stride, " bytes"));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] Total entries: ", commandsInfo.srcInfosArray.size / commandsInfo.srcInfosArray.stride));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] Scratch buffer: 0x", std::hex, commandsInfo.scratchData, std::dec));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] Implicit dest buffer: 0x", std::hex, commandsInfo.dstImplicitData, std::dec));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] Dest addresses buffer: 0x", std::hex, commandsInfo.dstAddressesArray.deviceAddress, std::dec));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] Dest addresses size: ", commandsInfo.dstAddressesArray.size, " bytes"));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] ALL BUFFERS ARE GPU-SIDE: CPU cannot read to validate content"));
+  Logger::info(str::format("[RTXMG INDIRECT-ARGS] This data will be read by GPU shader at next vkQueueSubmit"));
+  Logger::info("[RTXMG INDIRECT-ARGS] ========== READY TO SUBMIT TO GPU ==========");
+
   Logger::info("[RTXMG VK CALL] ========== CALLING vkCmdBuildClusterAccelerationStructureIndirectNV ==========");
+
+  Logger::info("[RTXMG VK CALL] ========== SUBMITTING TO GPU EXECUTION QUEUE ==========");
+  Logger::info("[RTXMG VK CALL] About to execute: vkCmdBuildClusterAccelerationStructureIndirectNV");
+  Logger::info(str::format("[RTXMG VK CALL] GPU will process indirect args from: 0x", std::hex, commandsInfo.srcInfosArray.deviceAddress, std::dec));
+  Logger::info(str::format("[RTXMG VK CALL] GPU will write results to: 0x", std::hex, commandsInfo.dstImplicitData, std::dec));
+  Logger::info("[RTXMG VK CALL] ========== CALLING GPU CLUSTER EXTENSION NOW ==========");
 
   g_clusterAccelExt.vkCmdBuildClusterAccelerationStructureIndirectNV(cmd, &commandsInfo);
 
   Logger::info("[RTXMG VK CALL] ========== vkCmdBuildClusterAccelerationStructureIndirectNV RETURNED ==========");
+  Logger::info("[RTXMG VK CALL] GPU work has been enqueued to command buffer (NOT YET EXECUTED ON GPU)");
   Logger::info(str::format("[RTXMG VK CALL] Cluster extension call completed successfully"));
+  Logger::info("[RTXMG VK CALL] Next operation in command stream will occur after all GPU work completes");
+
+  // ============================================================================
+  // DETAILED CLUSTER EXTENSION CALL LOGGING
+  // ============================================================================
+  Logger::info("[RTXMG CLUSTER-EXT] ========== CLUSTER EXTENSION SUBMISSION DETAILS ==========");
+  Logger::info(str::format("[RTXMG CLUSTER-EXT] Operation Type: ",
+    (desc.params.opType == VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_INSTANTIATE_CLUSTERS_NV ? "INSTANTIATE_CLAS (CLAS instantiation)" :
+     desc.params.opType == VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_CLUSTERS_BOTTOM_LEVEL_NV ? "BUILD_BLAS (BLAS building)" : "UNKNOWN")));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT] Operation Mode: ",
+    (desc.params.opMode == VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV ? "IMPLICIT_DESTINATIONS (GPU-driven)" :
+     desc.params.opMode == VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_EXPLICIT_DESTINATIONS_NV ? "EXPLICIT_DESTINATIONS (CPU-driven)" : "UNKNOWN")));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT] Max acceleration structures to process: ", desc.params.maxAccelerationStructureCount));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT] GPU Execution Environment:"));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]   Scratch buffer: 0x", std::hex, commandsInfo.scratchData, std::dec, " (GPU device address)"));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]   Source indirect args: 0x", std::hex, commandsInfo.srcInfosArray.deviceAddress, std::dec));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]     - Size per entry: ", commandsInfo.srcInfosArray.stride, " bytes"));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]     - Total size: ", commandsInfo.srcInfosArray.size, " bytes"));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]   Source count buffer: 0x", std::hex, commandsInfo.srcInfosCount, std::dec, " (0=use size/stride)"));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]   Destination addresses array: 0x", std::hex, commandsInfo.dstAddressesArray.deviceAddress, std::dec));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]     - Size per entry: ", commandsInfo.dstAddressesArray.stride, " bytes"));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]     - Total size: ", commandsInfo.dstAddressesArray.size, " bytes"));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]   Destination sizes array: 0x", std::hex, commandsInfo.dstSizesArray.deviceAddress, std::dec));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]     - Size per entry: ", commandsInfo.dstSizesArray.stride, " bytes"));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]     - Total size: ", commandsInfo.dstSizesArray.size, " bytes"));
+  Logger::info(str::format("[RTXMG CLUSTER-EXT]   Destination implicit buffer: 0x", std::hex, commandsInfo.dstImplicitData, std::dec));
+  Logger::info("[RTXMG CLUSTER-EXT] GPU will execute on next vkQueueSubmit() call");
+  Logger::info("[RTXMG CLUSTER-EXT] GPU will read indirect args and process each acceleration structure");
+  Logger::info("[RTXMG CLUSTER-EXT] GPU will write results (addresses and sizes) to output buffers");
+  Logger::info("[RTXMG CLUSTER-EXT] GPU must be synchronized via memory barrier before output buffers are read");
+  Logger::info("[RTXMG CLUSTER-EXT] ========== CLUSTER EXTENSION SUBMISSION COMPLETE ==========");
 
   Logger::info(str::format("[RTXMG] executeMultiIndirectClusterOperation: opType=",
     (desc.params.opType == VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_INSTANTIATE_CLUSTERS_NV ? "INSTANTIATE_CLAS" : "BUILD_BLAS"),

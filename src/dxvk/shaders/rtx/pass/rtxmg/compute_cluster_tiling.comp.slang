@@ -184,6 +184,9 @@ void processSurface(uint surfaceId, uint laneId, uint waveId) {
   surfaceVertexOffset = WaveReadLaneFirst(surfaceVertexOffset);
   clasBlocksOffset = WaveReadLaneFirst(clasBlocksOffset);
 
+  // Note: templateIndex and clasBytes already calculated above at lines 125-126
+  // Reuse those values instead of redeclaring
+
   // Write clusters (parallel across lanes)
   for (uint iCluster = laneId; iCluster < clusterCount; iCluster += kThreadsPerWave) {
     uint clusterX = iCluster % numClustersX;
@@ -195,6 +198,10 @@ void processSurface(uint surfaceId, uint laneId, uint waveId) {
     // Apply base cluster offset for multi-geometry batching
     uint clusterIndex = cb.baseClusterOffset + surfaceClusterOffset + iCluster;
     uint vertexOffset = surfaceVertexOffset + iCluster * verticesPerCluster;
+
+    // SDK MATCH: Calculate accumulated CLAS data offset (in bytes)
+    // clasBlocksOffset is already in 256-byte blocks, convert to bytes and add per-cluster offset
+    uint64_t clasDataOffset = uint64_t(clasBlocksOffset * 256) + uint64_t(iCluster) * uint64_t(clasBytes);
 
     writeCluster(
       clustersOut,
@@ -211,7 +218,8 @@ void processSurface(uint surfaceId, uint laneId, uint waveId) {
       clusterSize,
       edgeSegments,
       surface.geometryId,
-      uint2(numClustersX, numClustersY)  // NV-DXVK: Total grid dimensions for UV-based stable cluster IDs
+      uint2(numClustersX, numClustersY),  // NV-DXVK: Total grid dimensions for UV-based stable cluster IDs
+      clasDataOffset  // SDK MATCH: Accumulated CLAS offset in bytes
     );
   }
 }

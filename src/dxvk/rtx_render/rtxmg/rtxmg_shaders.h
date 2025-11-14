@@ -75,6 +75,16 @@ public:
     RW_STRUCTURED_BUFFER(9)    // clusterVertexPositionsOut
     RW_STRUCTURED_BUFFER(10)   // clusterVertexNormalsOut
     RW_STRUCTURED_BUFFER(11)   // clusterShadingDataOut
+
+    // Phase 4: GPU batching support - Instance data buffer (optional)
+    STRUCTURED_BUFFER(12)      // instanceDataBuffer
+
+    // Cluster offset/count pairs (SDK MATCH: for per-instance offset calculation)
+    STRUCTURED_BUFFER(13)      // clusterOffsetCounts
+
+    // Displacement mapping (optional)
+    TEXTURE2D(14)              // displacementTexture
+    SAMPLER(15)                // displacementSampler
   END_PARAMETER()
 };
 
@@ -156,11 +166,10 @@ public:
     CONSTANT_BUFFER(0)         // PatchTlasInstanceParams
 
     // Inputs (shifted +1)
-    STRUCTURED_BUFFER(1)       // patchEntries (TLAS index → blasPtrsBuffer index mapping)
-    STRUCTURED_BUFFER(2)       // blasAddresses (from cluster extension)
+    STRUCTURED_BUFFER(1)       // blasAddresses (from cluster extension)
 
     // Outputs (shifted +1)
-    RW_STRUCTURED_BUFFER(3)    // instanceDescsBuffer (TLAS instances to patch)
+    RW_STRUCTURED_BUFFER(2)    // instanceDescsBuffer (TLAS instances to patch - RWByteAddressBuffer)
   END_PARAMETER()
 };
 

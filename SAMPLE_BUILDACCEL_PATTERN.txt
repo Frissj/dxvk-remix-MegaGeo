@@ -1,0 +1,29 @@
+NVIDIA SAMPLE BUILDACCEL PATTERN (cluster_accel_builder.cpp lines 1254-1397):
+
+1. UpdateMemoryAllocations() - allocate buffers based on instance/geometry counts
+2. InitStructuredClusterTemplates() - initialize templates
+3. Clear tessellation counters for frame
+4. Clear cluster offset counts buffer
+5. Clear fill clusters dispatch indirect buffer
+6. ComputeClusterTiling loop - iterate through instances (lines 1283-1298):
+   - For each instance, call ComputeInstanceClusterTiling()
+7. Optional logging (with TessellationCounters download)
+8. FillInstanceClusters() - fill cluster data
+9. BuildStructuredCLASes() - build CLAS with timing (lines 1364-1366)
+10. BuildBlasFromClas() - build BLAS from CLAS (line 1368)
+11. Async Download counters with true flag (line 1371) - async, NOT sync
+12. m_buildAccelFrameIndex++ (line 1397)
+
+KEY DIFFERENCES FROM OUR CODE:
+- Sample does ComputeInstanceClusterTiling LOOP sequentially (lines 1283-1298)
+- Sample calls BuildStructuredCLASes ONCE after loop
+- Sample calls BuildBlasFromClas ONCE
+- Sample uses ASYNC download at very end (true parameter)
+- NO mid-frame syncs or flushes that would cause GPU stalls
+
+OUR CODE ISSUES:
+- tessellateCollectedGeometry() calls buildClustersGpuBatch() which batches everything
+- buildClusterAccelerationStructuresForFrame() is separate function
+- Possible sync points causing freezes
+
+SOLUTION: Adopt sample pattern exactly in our buildClusterAccelerationStructuresForFrame()

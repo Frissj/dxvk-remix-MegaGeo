@@ -321,7 +321,8 @@ void writeCluster(
   uint2 clusterSize,
   uint4 edgeSegments,
   uint localGeometryIndex,
-  uint2 numClusters)  // NV-DXVK: Total cluster grid dimensions for UV calculation
+  uint2 numClusters,
+  uint64_t clasDataOffset)  // SDK MATCH: Accumulated CLAS data offset in bytes
 {
   // Create cluster structure
   Cluster cluster;
@@ -374,8 +375,8 @@ void writeCluster(
 
   indirectArgsOut[clusterIndex] = indirectArgs;
 
-  // Store CLAS address
+  // Store CLAS address (SDK MATCH: Use accumulated offset, not simple multiplication)
   uint clasBytes = clasInstantiationBytes[templateIndex];
-  uint64_t clasAddress = params.clasDataBaseAddress + clusterIndex * clasBytes;
+  uint64_t clasAddress = params.clasDataBaseAddress + clasDataOffset;
   clasAddressesOut[clusterIndex] = clasAddress;
 }

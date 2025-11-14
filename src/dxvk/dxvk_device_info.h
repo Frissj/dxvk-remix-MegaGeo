@@ -54,6 +54,7 @@ namespace dxvk {
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT         extVertexAttributeDivisor;
   	VkPhysicalDeviceRayQueryFeaturesKHR	                      khrRayQueryFeatures;
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR	            khrDeviceRayTracingPipelineFeatures;
+    VkPhysicalDeviceRayTracingValidationFeaturesNV            nvRayTracingValidationFeatures;
   	VkPhysicalDeviceAccelerationStructureFeaturesKHR          khrAccelerationStructureFeatures;
     VkPhysicalDeviceClusterAccelerationStructureFeaturesNV    nvClusterAccelerationStructureFeatures;
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT              extShaderAtomicFloat;

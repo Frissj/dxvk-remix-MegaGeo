@@ -1,0 +1,136 @@
+=== CRITICAL ISSUES THAT COULD CAUSE CRASH OR SLOWDOWN ===
+
+TIER 1 - PERFORMANCE/CORRECTNESS CRITICAL:
+
+1. LOGGING OVERHEAD (40+ Logger::info calls)
+   - Even disabled logging creates formatted strings
+   - str::format() allocates memory and formats values
+   - This happens EVERY FRAME in buildBlasFromClas
+   - Logging calls in tight GPU-sync paths can cause stalls
+   → ACTION: Remove non-essential logging or make it conditional
+
+2. MEMORY BARRIER IMPLEMENTATION (Lines 1559-1582)
+   - Sample: NONE after executeMultiIndirectClusterOperation
+   - Ours: Explicit vkCmdPipelineBarrier call with detailed logging
+   - Manually inserting barriers can interfere with driver's optimization
+   - May cause unnecessary GPU stalls
+   → ACTION: Remove explicit barrier, trust Vulkan driver
+
+3. EXCEPTION HANDLING (try-catch around GPU call)
+   - Sample: Direct call, no error handling
+   - Ours: try-catch with two exception handlers
+   - Exception handling adds CPU overhead
+   - May interfere with GPU pipeline
+   → ACTION: Remove try-catch, add validation before GPU call instead
+
+4. GEOMETRY HASH MAPPING & FRAME TRACKING (Lines 1328-1368, ~50 lines)
+   - Sample: NONE (doesn't track per-geometry mapping)
+   - Ours: Complex frame tracking with static variables and hash map operations
+   - This runs EVERY FRAME but sample doesn't use it
+   - Hash map lookups/insertions add CPU overhead
+   - Not needed for correctness
+   → ACTION: Remove geometry hash mapping entirely (sample doesn't use it)
+
+TIER 2 - STRUCTURAL ISSUES:
+
+5. INLINED FILLBLASFROMPLASARGS (Lines 1412-1449)
+   - Sample: Calls helper function FillBlasFromClasArgs()
+   - Ours: Inlined ~38 lines of code
+   - Creates local params buffer every frame: ctx->updateBuffer()
+   - This buffer creation is in the hot path
+   - Sample's helper is cleaner and more modular
+   → ACTION: Extract into proper helper function
+
+6. CLUSTER ESTIMATION LOOP (Lines 1376-1382)
+   - Sample: NONE (doesn't estimate, GPU counter drives work)
+   - Ours: Loop through all drawCalls to estimate clusters
+   - This computation is unused - GPU counter is what matters
+   → ACTION: Remove or make optional (doesn't affect GPU work)
+
+7. UPDATE BLAS ALLOCATION (Line 1392)
+   - Sample: Called from BuildAccel (line 1265), separate concern
+   - Ours: Called inline in buildBlasFromClas
+   - Mixes concerns - buildBlasFromClas shouldn't handle allocation
+   → ACTION: Move to caller like sample does
+
+TIER 3 - NOT CRITICAL BUT WRONG:
+
+8. INITIALIZATION CHECKS (Lines 1312-1320)
+   - Sample: None
+   - Ours: Validate m_initialized and !drawCalls.empty()
+   - Good defensive programming but not in sample
+   → Optional: Keep for safety or remove to match sample
+
+9. EXCESSIVE VALIDATION LOGGING (Lines 1524-1540)
+   - All these Logger::info calls are noise
+   - Sample has 0 validation logging
+   → ACTION: Remove all validation logging
+
+10. READBACK STRATEGY (Lines 1587-1591)
+    - Sample: Implicit async readback (line 1371: m_buildAccelFrameIndex++)
+    - Ours: Disabled with long comment
+    - Might be necessary for correctness but adds comment overhead
+    → Check if this is actually needed
+
+=== MOST LIKELY CULPRITS FOR CRASH ===
+
+1. GEOMETRY HASH MAPPING - Most likely cause
+   - Complex logic that sample completely avoids
+   - Static frame tracking could have bugs
+   - Hash map operations could fail
+   - RECOMMENDATION: REMOVE ENTIRELY
+
+2. MEMORY BARRIER - Could cause GPU hang
+   - Manual barrier after GPU work might confuse driver
+   - Could cause synchronization issues
+   - RECOMMENDATION: REMOVE, let Vulkan driver handle it
+
+3. EXCEPTION HANDLING - Could mask real error
+   - catch(...) swallows unknown exceptions silently
+   - Could be hiding crash in exception handler
+   - RECOMMENDATION: REMOVE, validate before GPU call instead
+
+=== PRIORITY FIXES TO MATCH SAMPLE ===
+
+HIGH PRIORITY (for correctness):
+[ ] Remove geometry hash mapping (lines 1328-1368) - BIGGEST ISSUE
+[ ] Remove manual memory barrier (lines 1559-1582)
+[ ] Remove exception handling (lines 1545-1554)
+[ ] Remove cluster estimation loop (lines 1376-1382)
+
+MEDIUM PRIORITY (for performance):
+[ ] Remove all logging (40+ Logger::info calls)
+[ ] Extract FillBlasFromClasArgs into helper function
+[ ] Move updateBlasAllocation to caller
+[ ] Remove validation logging
+
+LOW PRIORITY (optional):
+[ ] Add ScopedMarker for timing (if we have stats infrastructure)
+[ ] Use designated initializers for struct
+[ ] Change return type to void
+
+REDUCTION STATISTICS:
+Current: 305 lines
+After removing high-priority items: ~100-120 lines
+Sample: 40 lines
+→ We'd still be 2.5-3x larger due to different architecture (RtxContext vs nvrhi)
+
+=== CONCLUSION ===
+
+The buildBlasFromClas function is trying to do WAY TOO MUCH.
+It should be a simple wrapper:
+  1. Call FillBlasFromClasArgs() to fill indirect args
+  2. Set up ClusterOperationDesc with parameter values
+  3. Call executeMultiIndirectClusterOperation()
+  4. Done.
+
+Instead it's doing:
+  - Geometry hash mapping (unnecessary)
+  - Frame tracking (unnecessary)
+  - Cluster estimation (unnecessary)
+  - Extensive logging (performance killer)
+  - Manual synchronization (trusts driver less than sample)
+  - Exception handling (adds overhead)
+  - Validation checks (defensive but unnecessary)
+
+This is 300+ lines of complexity for a 40-line operation.

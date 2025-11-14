@@ -49,6 +49,7 @@ public:
 
   // Size queries
   size_t elementBytes() const { return sizeof(T); }
+  size_t GetElementBytes() const { return sizeof(T); }  // SDK naming convention
   uint32_t numElements() const {
     return m_buffer != nullptr ? uint32_t(m_buffer->info().size / sizeof(T)) : 0;
   }
@@ -126,7 +127,7 @@ public:
 
   // Upload single element
   void uploadElement(const T& data, uint32_t index) {
-    if (!m_buffer) {
+    if (!m_buffer.ptr()) {
       return;
     }
 

@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cassert>
 #include <array>
+#include <chrono>
 
 #include "dxvk_device.h"
 #include "dxvk_scoped_annotation.h"
@@ -581,32 +582,57 @@ namespace dxvk {
       // Update RTX Mega Geometry per frame (build BLAS, update HiZ) - ONLY when we have surfaces
       // Cannot build cluster BLASes without patching them, and GPU patching requires RTX GPU context
       if (hasSurfaces) {
+        // === FRAME TIMING START ===
+        auto frameTimingStart = std::chrono::high_resolution_clock::now();
+        Logger::info(str::format("[FRAME TIMING] Frame ", m_device->getCurrentFrameId(), ": ========== FRAME PROCESSING START =========="));
+
         Logger::info(str::format("[RTX CONTEXT] Frame ", m_device->getCurrentFrameId(), ": Calling updateMegaGeometryPerFrame"));
+        auto t_megageom_start = std::chrono::high_resolution_clock::now();
         updateMegaGeometryPerFrame(this, getSceneManager(), rtOutput.m_primaryDepth.view);
-        Logger::info(str::format("[RTX CONTEXT] Frame ", m_device->getCurrentFrameId(), ": updateMegaGeometryPerFrame returned"));
+        auto t_megageom_end = std::chrono::high_resolution_clock::now();
+        auto t_megageom_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_megageom_end - t_megageom_start);
+        Logger::info(str::format("[RTX CONTEXT] Frame ", m_device->getCurrentFrameId(), ": updateMegaGeometryPerFrame returned (took ", t_megageom_ms.count(), "ms)"));
+        Logger::info(str::format("[FRAME TIMING] Frame ", m_device->getCurrentFrameId(), ": updateMegaGeometryPerFrame took ", t_megageom_ms.count(), "ms"));
+
         // Build TLAS and patch cluster BLAS addresses
         // GPU patching compute shader requires GPU context which only exists in RTX pipeline
         Logger::info(str::format("[RTX CONTEXT] About to call buildTlas (frame ", m_device->getCurrentFrameId(), ")"));
+        auto t_tlas_start = std::chrono::high_resolution_clock::now();
         getSceneManager().buildTlas(this);
-        Logger::info(str::format("[RTX CONTEXT] buildTlas returned (frame ", m_device->getCurrentFrameId(), ")"));
+        auto t_tlas_end = std::chrono::high_resolution_clock::now();
+        auto t_tlas_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_tlas_end - t_tlas_start);
+        Logger::info(str::format("[RTX CONTEXT] buildTlas returned (frame ", m_device->getCurrentFrameId(), ", took ", t_tlas_ms.count(), "ms)"));
+        Logger::info(str::format("[FRAME TIMING] Frame ", m_device->getCurrentFrameId(), ": buildTlas took ", t_tlas_ms.count(), "ms"));
         // NOTE: buildTlas() emits its own post-TLAS barrier internally (line 1548-1554 in rtx_accel_manager.cpp)
         // which properly synchronizes TLAS writes -> ray tracing reads. No additional barrier needed here.
         getCommonObjects()->getTextureManager().prepareSamplerFeedback(this);
 
         // Generate ray tracing constant buffer
         Logger::info(str::format("[RTX CONTEXT] About to call updateRaytraceArgsConstantBuffer (frame ", m_device->getCurrentFrameId(), ")"));
+        auto t_args_start = std::chrono::high_resolution_clock::now();
         updateRaytraceArgsConstantBuffer(rtOutput, downscaledExtent, targetImage->info().extent);
-        Logger::info(str::format("[RTX CONTEXT] updateRaytraceArgsConstantBuffer returned (frame ", m_device->getCurrentFrameId(), ")"));
+        auto t_args_end = std::chrono::high_resolution_clock::now();
+        auto t_args_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_args_end - t_args_start);
+        Logger::info(str::format("[RTX CONTEXT] updateRaytraceArgsConstantBuffer returned (frame ", m_device->getCurrentFrameId(), ", took ", t_args_ms.count(), "ms)"));
+        Logger::info(str::format("[FRAME TIMING] Frame ", m_device->getCurrentFrameId(), ": updateRaytraceArgsConstantBuffer took ", t_args_ms.count(), "ms"));
 
         // Volumetric Lighting
         Logger::info(str::format("[RTX CONTEXT] About to call dispatchVolumetrics (frame ", m_device->getCurrentFrameId(), ")"));
+        auto t_volumetric_start = std::chrono::high_resolution_clock::now();
         dispatchVolumetrics(rtOutput);
-        Logger::info(str::format("[RTX CONTEXT] dispatchVolumetrics returned (frame ", m_device->getCurrentFrameId(), ")"));
+        auto t_volumetric_end = std::chrono::high_resolution_clock::now();
+        auto t_volumetric_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_volumetric_end - t_volumetric_start);
+        Logger::info(str::format("[RTX CONTEXT] dispatchVolumetrics returned (frame ", m_device->getCurrentFrameId(), ", took ", t_volumetric_ms.count(), "ms)"));
+        Logger::info(str::format("[FRAME TIMING] Frame ", m_device->getCurrentFrameId(), ": dispatchVolumetrics took ", t_volumetric_ms.count(), "ms"));
 
         // Path Tracing
         Logger::info(str::format("[RTX CONTEXT] About to call dispatchPathTracing (frame ", m_device->getCurrentFrameId(), ")"));
+        auto t_pathtrace_start = std::chrono::high_resolution_clock::now();
         dispatchPathTracing(rtOutput);
-        Logger::info(str::format("[RTX CONTEXT] dispatchPathTracing returned (frame ", m_device->getCurrentFrameId(), ")"));
+        auto t_pathtrace_end = std::chrono::high_resolution_clock::now();
+        auto t_pathtrace_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_pathtrace_end - t_pathtrace_start);
+        Logger::info(str::format("[RTX CONTEXT] dispatchPathTracing returned (frame ", m_device->getCurrentFrameId(), ", took ", t_pathtrace_ms.count(), "ms)"));
+        Logger::info(str::format("[FRAME TIMING] Frame ", m_device->getCurrentFrameId(), ": dispatchPathTracing took ", t_pathtrace_ms.count(), "ms"));
 
         // Neural Radiance Cache
         m_common->metaNeuralRadianceCache().dispatchTrainingAndResolve(*this, rtOutput);
@@ -747,6 +773,11 @@ namespace dxvk {
         Logger::info(str::format("[RTX CONTEXT] About to call rtOutput.onFrameEnd (frame ", m_device->getCurrentFrameId(), ")"));
         rtOutput.onFrameEnd();
         Logger::info(str::format("[RTX CONTEXT] rtOutput.onFrameEnd returned (frame ", m_device->getCurrentFrameId(), ")"));
+
+        // === FRAME TIMING END ===
+        auto frameTimingEnd = std::chrono::high_resolution_clock::now();
+        auto frameTimingTotal = std::chrono::duration_cast<std::chrono::milliseconds>(frameTimingEnd - frameTimingStart);
+        Logger::info(str::format("[FRAME TIMING] Frame ", m_device->getCurrentFrameId(), ": ========== TOTAL FRAME TIME = ", frameTimingTotal.count(), "ms =========="));
       }
 
       m_previousInjectRtxHadScene = true;

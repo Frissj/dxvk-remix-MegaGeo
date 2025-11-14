@@ -266,7 +266,15 @@ dxvk_src = files([
   'rtx_render/rtx_mega_geometry_integration.cpp',
   'rtx_render/rtx_mega_geometry_integration.h',
   'rtx_render/rtxmg/rtxmg_cluster_builder.cpp',
+  'rtx_render/rtxmg/rtxmg_cluster_builder.h',
+  'rtx_render/rtxmg/rtxmg_subdivision_builder.cpp',
+  'rtx_render/rtxmg/rtxmg_subdivision_builder.h',
   'rtx_render/rtxmg/rtxmg_accel.cpp',
+
+  # RTX Mega Geometry SDK - Headers only
+  # Note: External dependencies (OpenSubdiv, donut) not available in dxvk-remix
+  # Shader evaluation happens on GPU using shader code from RTX MGSK
+
   'rtx_render/rtx_mipmap.cpp',
   'rtx_render/rtx_mipmap.h',
   'rtx_render/rtx_mod_manager.cpp',
@@ -488,10 +496,15 @@ delayimp_dep = declare_dependency(
 	dependencies : [ lib_delayimp])
 dxvk_deps += delayimp_dep
 
+# RTX Mega Geometry SDK include paths
+rtxmg_sdk_include_path = include_directories('rtx_render/rtxmg/rtxmg_sdk/include')
+donut_include_path = include_directories('../../extern/donut/include')
+osd_lite_include_path = include_directories('../../extern/osd_lite')
+
 dxvk_lib = static_library('dxvk', dxvk_src, dxvk_version, [generated_dxvk_shaders, rtx_shaders, dxvk_generated_embedded_files],
-  link_with           : [ util_lib, spirv_lib, usd_plugins ], 
+  link_with           : [ util_lib, spirv_lib, usd_plugins ],
   dependencies        : [ dxvk_deps ],
-  include_directories : [ dxvk_include_path, dxvk_shader_include_path, rtxdi_include_path, remix_api_include_path, rtxcr_include_path, submodules_include_path  ],
+  include_directories : [ dxvk_include_path, dxvk_shader_include_path, rtxdi_include_path, remix_api_include_path, rtxcr_include_path, submodules_include_path, rtxmg_sdk_include_path, donut_include_path, osd_lite_include_path ],
   override_options    : ['cpp_std='+dxvk_cpp_std],
   # Force switch statements over enums to either cover all cases or have a default case.
   cpp_args            : dxvk_is_msvc ? ['/we4062'] : ['-Wswitch'])

@@ -831,43 +831,22 @@ namespace dxvk {
       // CRITICAL: Store BOTH persistent buffers - BLAS references these!
       // persistentInstanceBuffer contains the actual cluster instance data (512 bytes per cluster)
       // clusterReferencesBuffer contains device addresses pointing to persistentInstanceBuffer
-      entry.clusterInstanceBuffer = clusterAccels->persistentInstanceBuffer.getBuffer();
-      entry.clusterReferencesBuffer = clusterAccels->clusterReferencesBuffer.getBuffer();
-      entry.clusterCount = output.numClusters;
+      // DISABLED: Do NOT cache cluster BLAS anymore
+      // Rebuild from scratch every frame to avoid complex synchronization issues
+      // Just store minimal info for logging, but don't inject it
+      entry.clusterInstanceBuffer = nullptr;
+      entry.clusterReferencesBuffer = nullptr;
+      entry.clusterCount = 0;
+      entry.clusterBlasAddress = 0;
+      entry.clusterBlasSize = 0;
+      entry.blasSizeBytes = 0;
 
-      // CRITICAL: Do NOT cache the BLAS address here!
-      // With VK_NV_cluster_acceleration_structure in EXPLICIT_DESTINATIONS mode, each geometry
-      // gets its own unique BLAS address written to blasPtrsBuffer[geometryIndex] by the GPU.
-      // The addresses are DIFFERENT for each geometry (they point to different BLASes within
-      // the unified structure). CPU-side has NO access to these addresses - they're GPU-only.
-      // GPU patching reads from blasPtrsBuffer and writes the correct per-geometry addresses.
-      entry.clusterBlasAddress = 0;  // Will be patched by GPU shader from blasPtrsBuffer
-      entry.clusterBlasSize = clusterBlasSize;
-
-      // IMPORTANT: Do NOT add BLAS size to per-geometry memory accounting!
-      // The BLAS is a SHARED/UNIFIED resource across multiple geometries.
-      // Including it would count the same buffer hundreds of times, causing cache size to
-      // be massively inflated (e.g., 730 entries * 6MB = 4.4GB when actual usage is ~100MB).
-      entry.blasSizeBytes = clusterBlasSize > 0 ? clusterBlasSize : entry.clusterBLAS->info().size;
-      // entry.memorySizeBytes += blasBytes;  // REMOVED - causes massive overcounting
-
-      // CRITICAL GPU SYNCHRONIZATION: Store fence from BLAS build submission
-      // We get the fence from the current command list being recorded
-      // Later, vkGetFenceStatus() checks completion without blocking
-      entry.buildFence = ctx->getCommandList()->fence();
-      entry.gpuWorkComplete = false;  // Will be verified on first reuse
-
-      Logger::info(str::format("[RTXMG] Cached cluster BLAS: clusters=", entry.clusterCount,
-                              ", size=", entry.blasSizeBytes / 1024, "KB",
-                              ", buildFence=", (void*)entry.buildFence,
-                              " (will verify with vkGetFenceStatus on reuse)"));
+      Logger::info(str::format("[RTXMG] Cluster BLAS caching disabled - rebuilding fresh every frame"));
     } else {
       entry.hasClusterBLAS = false;
       entry.clusterBLAS = nullptr;
       entry.clusterCount = 0;
       entry.blasSizeBytes = 0;
-      entry.buildFence = VK_NULL_HANDLE;
-      entry.gpuWorkComplete = false;
     }
 
     m_tessellationCache[hash] = entry;

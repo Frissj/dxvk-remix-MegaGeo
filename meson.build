@@ -296,6 +296,9 @@ rtxcr_include_path_string = join_paths(global_src_root_norm, 'submodules/rtxcr/s
 submodules_include_path = include_directories('submodules')
 submodules_include_path_string = join_paths(global_src_root_norm, 'submodules')
 
+# RTX Mega Geometry SDK include path (for shader compilation)
+rtxmg_sdk_include_path_string = join_paths(global_src_root_norm, 'src/dxvk/rtx_render/rtxmg/rtxmg_sdk/include')
+
 rtx_shaders_command_arguments = [
   shader_compile_script,
   # Note: Meson annoyingly represents these "find_program" results as a special object which works fine when used in Meson functions, but
@@ -313,6 +316,7 @@ rtx_shaders_command_arguments = [
   '-include', rtxdi_include_path_string,
   '-include', rtxcr_include_path_string,
   '-include', submodules_include_path_string,
+  '-include', rtxmg_sdk_include_path_string,
   '-include', volumetrics_include_path_string,
   '-output', rtx_shader_output_directory,
   '-parallel',

@@ -20,6 +20,8 @@
 * DEALINGS IN THE SOFTWARE.
 */
 
+#include <chrono>
+
 #include "rtx_mega_geometry.h"
 #include "rtx_mega_geometry_integration.h"
 #include "rtx_context.h"
@@ -461,46 +463,78 @@ namespace dxvk {
 
     ScopedGpuProfileZone(ctx, "RTX Mega Geometry: Frame Update");
 
+    uint32_t currentFrameId = ctx->getDevice()->getCurrentFrameId();
+    auto megageom_total_start = std::chrono::high_resolution_clock::now();
+    Logger::info(str::format("[MEGAGEOM TIMING] Frame ", currentFrameId, ": ========== updateMegaGeometryPerFrame START =========="));
+
     // NOTE: Do NOT clear tessellation cache - keep it across frames to cache BLASes for unchanged geometry
     // Only geometries that appear this frame get tessellated, others reuse cached BLASes
-    uint32_t currentFrameId = ctx->getDevice()->getCurrentFrameId();
     Logger::info(str::format("[RTX Mega Geometry] Frame ", currentFrameId, ": Cache has ",
                             s_geometryTessellationCache.size(), " geometries from previous frames"));
 
     // CRITICAL: Rotate frame buffers BEFORE building any geometry this frame
     // This resets the cluster counter and ensures proper ring buffering for GPU lag
     RtxmgConfig config;  // Default config from options
+    auto t_updateperframe_start = std::chrono::high_resolution_clock::now();
     s_megaGeometry->getClusterBuilder()->updatePerFrame(ctx, depthBuffer, config);
+    auto t_updateperframe_end = std::chrono::high_resolution_clock::now();
+    auto t_updateperframe_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_updateperframe_end - t_updateperframe_start);
+    Logger::info(str::format("[MEGAGEOM TIMING] Frame ", currentFrameId, ": getClusterBuilder()->updatePerFrame took ", t_updateperframe_ms.count(), "ms"));
 
     // BATCHED TESSELLATION: Tessellate all collected geometry in ONE dispatch
+    auto t_tessellate_start = std::chrono::high_resolution_clock::now();
     s_megaGeometry->tessellateCollectedGeometry(ctx);
+    auto t_tessellate_end = std::chrono::high_resolution_clock::now();
+    auto t_tessellate_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_tessellate_end - t_tessellate_start);
+    Logger::info(str::format("[MEGAGEOM TIMING] Frame ", currentFrameId, ": tessellateCollectedGeometry took ", t_tessellate_ms.count(), "ms"));
 
     // Emit memory barrier ONCE per frame for all tessellation dispatches
     // This batches all compute writes before synchronization (avoids GPU timeout)
+    auto t_barrier1_start = std::chrono::high_resolution_clock::now();
     ctx->emitMemoryBarrier(0,
       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
       VK_ACCESS_SHADER_WRITE_BIT,
       VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
       VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    auto t_barrier1_end = std::chrono::high_resolution_clock::now();
+    auto t_barrier1_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_barrier1_end - t_barrier1_start);
+    Logger::info(str::format("[MEGAGEOM TIMING] Frame ", currentFrameId, ": emitMemoryBarrier #1 took ", t_barrier1_ms.count(), "ms"));
 
     // Update HiZ buffer for visibility culling
     if (RtxMegaGeometry::enableHiZCulling() && depthBuffer != nullptr) {
+      auto t_hiz_start = std::chrono::high_resolution_clock::now();
       s_megaGeometry->updateHiZ(ctx, depthBuffer);
+      auto t_hiz_end = std::chrono::high_resolution_clock::now();
+      auto t_hiz_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_hiz_end - t_hiz_start);
+      Logger::info(str::format("[MEGAGEOM TIMING] Frame ", currentFrameId, ": updateHiZ took ", t_hiz_ms.count(), "ms"));
     }
 
     // CRITICAL: Ensure all tessellation work is COMPLETE before cluster acceleration structures
     // The tessellation shaders write to buffers that the cluster extension will read
     // Without explicit sync, GPU can deadlock or corrupt memory
+    auto t_barrier2_start = std::chrono::high_resolution_clock::now();
     ctx->emitMemoryBarrier(0,
       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
       VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
       VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT);
+    auto t_barrier2_end = std::chrono::high_resolution_clock::now();
+    auto t_barrier2_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_barrier2_end - t_barrier2_start);
+    Logger::info(str::format("[MEGAGEOM TIMING] Frame ", currentFrameId, ": emitMemoryBarrier #2 took ", t_barrier2_ms.count(), "ms"));
 
     // Build cluster acceleration structures for all geometry submitted this frame
     // This now includes BLAS building AND cluster BLAS injection into scene instances
     // (matching NVIDIA sample structure: BuildAccel → FillInstanceDescs → buildTopLevelAccelStruct)
+    auto t_buildaccel_start = std::chrono::high_resolution_clock::now();
     s_megaGeometry->buildClusterAccelerationStructuresForFrame(ctx);
+    auto t_buildaccel_end = std::chrono::high_resolution_clock::now();
+    auto t_buildaccel_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_buildaccel_end - t_buildaccel_start);
+    Logger::info(str::format("[MEGAGEOM TIMING] Frame ", currentFrameId, ": buildClusterAccelerationStructuresForFrame took ", t_buildaccel_ms.count(), "ms"));
+    Logger::info(str::format("[FRAME TIMING] Frame ", currentFrameId, ": buildClusterAccelerationStructuresForFrame took ", t_buildaccel_ms.count(), "ms"));
+
+    auto megageom_total_end = std::chrono::high_resolution_clock::now();
+    auto megageom_total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(megageom_total_end - megageom_total_start);
+    Logger::info(str::format("[MEGAGEOM TIMING] Frame ", currentFrameId, ": ========== updateMegaGeometryPerFrame TOTAL = ", megageom_total_ms.count(), "ms =========="));
     // NOTE: injectClusterBlasesIntoScene() is now called internally in buildClusterAccelerationStructuresForFrame()
     // DO NOT call it again here - it's already been done!
 
@@ -592,15 +626,17 @@ namespace dxvk {
       BlasEntry* blasEntry = rtInstance->getBlas();
       if (!blasEntry) continue;
 
-      // Skip if dynamicBlas already set (e.g., from previous frame cache hit in scene manager)
-      if (blasEntry->dynamicBlas != nullptr) {
-        Logger::info("[CLUSTER INJECTION] Instance already has dynamicBlas set, skipping");
-        continue;
-      }
-
-      // Inject cluster BLAS - GPU patching will handle per-geometry address lookup
+      // CRITICAL FIX: ALWAYS update dynamicBlas pointer every frame
+      // Previously we skipped if already set, but this caused stale BLAS pointers from previous frames
+      // to be used in ray tracing shaders, resulting in GPU device lost errors
+      // Instances are cached across frames by scene manager, but BLAS data changes every frame
+      const bool wasAlreadySet = (blasEntry->dynamicBlas != nullptr);
       blasEntry->dynamicBlas = clusterPooledBlas;
       injectedCount++;
+
+      if (wasAlreadySet) {
+        Logger::info("[CLUSTER INJECTION] Instance BLAS updated (was already set, now refreshed with current frame data)");
+      }
     }
 
     Logger::info(str::format("[CLUSTER INJECTION] ========== COMPLETE =========="));

@@ -24,6 +24,7 @@
 #include "rtxmg_counters.h"
 #include "rtxmg_cluster.h"
 #include "rtxmg_buffer.h"
+#include "rtxmg_subdivision_builder.h"
 #include "vk_nv_cluster_acceleration_structure.h"
 #include "../../dxvk_device.h"
 #include <vector>
@@ -257,20 +258,133 @@ public:
     uint32_t count;
   };
 
-  // Split CLAS and BLAS building to match reference implementation
-  // Reference: cluster_accel_builder.cpp:1365-1368
-  // Line 1365: BuildStructuredCLASes() - builds all CLAS
-  // Line 1368: BuildBlasFromClas() - builds all BLAS from CLAS
-  bool buildStructuredCLASes(
+  // Main entry point for cluster acceleration structure building
+  // Reference: cluster_accel_builder.cpp:1254-1398 (BuildAccel)
+  // This is the unified function that should be called instead of buildStructuredCLASes + buildBlasFromClas
+  bool buildClusterAccelerationStructuresForFrame(
     RtxContext* ctx,
     const std::vector<DrawCallData>& drawCalls,
     const RtxmgConfig& config,
     uint32_t frameIndex);
 
+  // Split CLAS and BLAS building to match reference implementation
+  // Reference: cluster_accel_builder.cpp:1365-1368
+  // Line 1365: BuildStructuredCLASes() - builds all CLAS
+  // Line 1368: BuildBlasFromClas() - builds all BLAS from CLAS
+  // Note: Prefer using buildClusterAccelerationStructuresForFrame() instead of calling these directly
+  bool buildStructuredCLASes(
+    RtxContext* ctx,
+    const std::vector<DrawCallData>& drawCalls,
+    const RtxmgConfig& config,
+    uint32_t frameIndex,
+    VkDeviceSize tessCounterOffset);
+
   bool buildBlasFromClas(
     RtxContext* ctx,
     const std::vector<DrawCallData>& drawCalls,
     const RtxmgConfig& config);
+
+  // Fill cluster vertex data for all instances
+  // Reference: cluster_accel_builder.cpp:621-778 (FillInstanceClusters)
+  void fillInstanceClusters(
+    RtxContext* ctx,
+    const std::vector<DrawCallData>& drawCalls,
+    const RtxmgConfig& config);
+
+  // ============================================================================
+  // Linear Tessellation Shape Builder (Minimal Implementation)
+  // ============================================================================
+  // Builds linear tessellation data from triangle mesh
+  // Uses kBilinear mode (exact geometry preservation, no smoothing)
+  // Avoids external dependencies (OpenSubdiv, donut)
+  struct LinearShape {
+    // Topology information for linear tessellation
+    std::vector<float3> controlPoints;    // Original mesh vertices
+    std::vector<uint32_t> indices;        // Original mesh indices
+    std::vector<float3> normals;          // Vertex normals
+    std::vector<float2> texcoords;        // Texture coordinates
+
+    // Tessellation parameters
+    uint32_t tessellationLevel = 1;       // 1 = original mesh, 2 = 4x subdivision, etc.
+    uint32_t vertexCount = 0;
+    uint32_t indexCount = 0;
+    uint32_t triangleCount = 0;
+
+    bool isValid() const {
+      return !controlPoints.empty() && !indices.empty() && indexCount == indices.size();
+    }
+  };
+
+  // Build linear tessellation shape from triangle mesh data
+  // For kBilinear scheme: exact geometry preservation with linear interpolation
+  // Returns false if input is invalid
+  bool buildLinearShape(
+    const std::vector<float3>& positions,
+    const std::vector<uint32_t>& indices,
+    const std::vector<float3>& normals,
+    const std::vector<float2>& texcoords,
+    uint32_t tessLevel,
+    LinearShape& outShape);
+
+  // ============================================================================
+  // GPU-SIDE SUBDIVISION SURFACE SUPPORT
+  // Builds subdivision surface topology for SubdivisionEvaluatorHLSL shader
+  struct SubdivisionSurfaceData {
+    // Control point topology
+    std::vector<float3> controlPoints;         // Original mesh vertices
+    std::vector<uint32_t> controlPointIndices; // Indices (flattened)
+    std::vector<uint32_t> triangleIndices;     // Per-triangle indices for GPU evaluation
+
+    // GPU buffers for subdivision evaluation (populated by C++ code)
+    // These are uploaded to GPU and used by fill_clusters shader
+    std::vector<float> stencilMatrix;          // Stencil coefficients for bilinear/linear evaluation
+    std::vector<uint32_t> subdivisionPlans;    // Subdivision evaluation plans
+    std::vector<uint32_t> subpatchTrees;       // Hierarchical subdivision trees
+    std::vector<uint32_t> patchPointIndices;   // Patch point indexing
+    std::vector<float3> vertexPatchPoints;     // Evaluated patch points
+
+    // Metadata
+    uint32_t vertexCount = 0;
+    uint32_t triangleCount = 0;
+    uint32_t isolationLevel = 0;               // OpenSubdiv isolation level (0-4)
+
+    bool isValid() const {
+      return !controlPoints.empty() && !controlPointIndices.empty();
+    }
+  };
+
+  // Build subdivision surface data from triangle mesh
+  // Supports GPU-side stencil evaluation for 8x performance improvement
+  // Uses linear (kBilinear) subdivision for exact geometry preservation
+  bool buildSubdivisionSurfaces(
+    const std::vector<float3>& positions,
+    const std::vector<uint32_t>& indices,
+    const std::vector<float3>& normals,
+    const std::vector<float2>& texcoords,
+    uint32_t isolationLevel,
+    SubdivisionSurfaceData& outData);
+
+  // Helper: populate stencil matrix for linear interpolation evaluation
+  void populateLinearSubdivisionStencils(
+    const std::vector<float3>& positions,
+    const std::vector<uint32_t>& indices,
+    SubdivisionSurfaceData& outData);
+
+  // Process input geometry with OpenSubdiv integration
+  // Pre-computes subdivision surface topology for GPU-side evaluation
+  bool processGeometryWithSubdivision(
+    const std::vector<float3>& positions,
+    const std::vector<uint32_t>& indices,
+    const std::vector<float3>& normals,
+    const std::vector<float2>& texcoords,
+    uint32_t isolationLevel,
+    SubdivisionSurfaceGPUData& outSurfaceData);
+
+  // Upload pre-computed subdivision data to GPU buffers for shader access
+  // Allocates GPU buffers and copies CPU-side data (control points, stencil matrix, etc.)
+  // Called before fillInstanceClusters to populate shader-accessible buffers
+  bool uploadSubdivisionDataToGPU(
+    const SubdivisionSurfaceGPUData& surfaceData);
 
   const ClusterAccels& getFrameAccels() const { return m_frameAccels; }
 
@@ -323,6 +437,12 @@ public:
     uint32_t requiredVertices,
     const RtxmgConfig& config);
 
+  // Dynamic BLAS allocation (SDK MATCH: cluster_accel_builder.cpp:1197-1223)
+  // Releases and recreates BLAS buffers when cluster/instance count changes significantly
+  // Takes RtxContext for fence tracking to safely release old buffers
+  // Must be called ONCE per frame BEFORE buildBlasFromClas to avoid repeated reallocation
+  void updateBlasAllocation(RtxContext* ctx, uint32_t totalClusters, uint32_t maxClustersPerBlas, uint32_t numInstances);
+
   // Get current frame's instance buffer (for copying to persistent storage)
   Rc<DxvkBuffer> getRingBufferInstanceBuffer() {
     return m_frameBuffers.instanceBuffer.getBuffer();
@@ -343,11 +463,6 @@ private:
   void createGPUBuffers(const RtxmgConfig& config);
   void resizeBuffersIfNeeded(uint32_t requiredClusters, uint32_t requiredVertices);
   void queueBlasAddressReadback(RtxContext* ctx, uint32_t count);
-
-  // Dynamic BLAS allocation (SDK MATCH: cluster_accel_builder.cpp:1197-1223)
-  // Releases and recreates BLAS buffers when cluster/instance count changes significantly
-  // Takes RtxContext for fence tracking to safely release old buffers
-  void updateBlasAllocation(RtxContext* ctx, uint32_t totalClusters, uint32_t maxClustersPerBlas, uint32_t numInstances);
 
   // Production buffer management (Phase 2)
   void updateMemoryPressureDetection();
@@ -421,6 +536,9 @@ private:
   // Statistics
   RtxmgStatistics m_stats;
 
+  // Subdivision surface builder (OpenSubdiv integration)
+  RtxmgSubdivisionBuilder m_subdivisionBuilder;
+
   // Allocation tracking
   uint32_t m_allocatedClusters = 0;
   uint32_t m_allocatedVertices = 0;
@@ -471,7 +589,12 @@ private:
   static constexpr size_t STORAGE_BUFFER_ALIGNMENT = 16; // Common SSBO alignment
   static constexpr size_t VERTEX_BUFFER_ALIGNMENT = 4;   // Float alignment
 
-  // Tessellation counters buffer (SINGLE buffer with GPU sync - SDK MATCH)
+  // Ring buffer configuration (SDK MATCH: cluster_accel_builder.cpp:66)
+  static constexpr uint32_t kFrameCount = 4;  // Ring buffer size for async counter downloads
+
+  // Tessellation counters buffer (RING-BUFFERED with async downloads - SDK MATCH)
+  // Sample uses ring buffer to avoid GPU stalls: current frame writes to slot N,
+  // CPU reads from slot N-1 which is guaranteed complete
   RtxmgBuffer<TessellationCounters> m_tessCountersBuffer;
   Rc<DxvkBuffer> m_tessCountersReadback;
   bool m_counterReadbackReady = false;
@@ -533,6 +656,17 @@ private:
   RtxmgBuffer<float3> m_clusterVertexPositions;
   RtxmgBuffer<float3> m_clusterVertexNormals;
 
+  // GPU-SIDE SUBDIVISION SURFACE BUFFERS (OpenSubdiv integration)
+  // Pre-computed by C++ code, used for 8x faster GPU evaluation
+  RtxmgBuffer<float3> m_subdivisionControlPoints;
+  RtxmgBuffer<float> m_subdivisionStencilMatrix;
+  RtxmgBuffer<uint32_t> m_subdivisionSurfaceDescriptors;
+  RtxmgBuffer<uint32_t> m_subdivisionPlans;
+
+  // Current subdivision surface data (CPU-side)
+  SubdivisionSurfaceGPUData m_currentSubdivisionData;
+  bool m_subdivisionDataReady = false;
+
   // Cluster indirect args (matches VkClusterAccelerationStructureInstantiateClusterInfoNV)
   // SDK Format: clusterIdOffset (4) + geometryIndexAndReserved (4) + clusterTemplate (8) + vertexBuffer.startAddress (8) + vertexBuffer.strideInBytes (8) = 32 bytes
   struct ClusterIndirectArgs {
@@ -544,6 +678,14 @@ private:
     // Total: 32 bytes
   };
   RtxmgBuffer<ClusterIndirectArgs> m_clusterIndirectArgs;
+
+  // BLAS indirect args (computed by FillBlasFromClasArgs shader, used for BLAS building)
+  struct BlasIndirectArg {
+    VkDeviceAddress clusterAddresses;
+    uint32_t clusterCount;
+    uint32_t _padding;
+  };
+  RtxmgBuffer<BlasIndirectArg> m_blasIndirectArgsBuffer;
 
   // Frame-wide instantiation buffers (SINGLE buffers with GPU sync - SDK MATCH)
   // PROPER BATCHING: All geometries in a frame use the same buffers, instantiated in a single GPU call

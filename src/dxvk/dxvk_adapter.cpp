@@ -343,7 +343,7 @@ namespace dxvk {
           DxvkDeviceFeatures  enabledFeatures) {
     DxvkDeviceExtensions devExtensions;
 
-    std::array<DxvkExt*, 44> devExtensionList = {{
+    std::array<DxvkExt*, 45> devExtensionList = {{
       &devExtensions.amdMemoryOverallocationBehaviour,
       &devExtensions.amdShaderFragmentMask,
       &devExtensions.ext4444Formats,
@@ -376,6 +376,7 @@ namespace dxvk {
       &devExtensions.khrRayQueries,
 #endif
       &devExtensions.khrRayTracingPipeline,
+      &devExtensions.nvRayTracingValidation,
       &devExtensions.khrPipelineLibrary,
       &devExtensions.khrPushDescriptor,
       &devExtensions.khrShaderInt8Float16Types,
@@ -542,6 +543,12 @@ namespace dxvk {
     if (devExtensions.khrRayTracingPipeline) {
         enabledFeatures.khrDeviceRayTracingPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
         enabledFeatures.khrDeviceRayTracingPipelineFeatures.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.khrDeviceRayTracingPipelineFeatures);
+    }
+
+    if (devExtensions.nvRayTracingValidation) {
+      enabledFeatures.nvRayTracingValidationFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_VALIDATION_FEATURES_NV;
+      enabledFeatures.nvRayTracingValidationFeatures.rayTracingValidation = VK_TRUE;
+      enabledFeatures.nvRayTracingValidationFeatures.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.nvRayTracingValidationFeatures);
     }
 
     if (devExtensions.ext4444Formats) {
